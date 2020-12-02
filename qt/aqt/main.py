@@ -405,9 +405,12 @@ class AnkiQt(QMainWindow):
             self.pendingImport = None
         gui_hooks.profile_did_open()
 
-        if onsuccess is None:
-            onsuccess = lambda: None
-        self.maybe_auto_sync_on_open_close(onsuccess)
+        def _onsuccess():
+            self._refresh_after_sync()
+            if onsuccess:
+                onsuccess()
+
+        self.maybe_auto_sync_on_open_close(_onsuccess)
 
     def unloadProfile(self, onsuccess: Callable) -> None:
         def callback():
@@ -866,9 +869,15 @@ title="%s" %s>%s</button>""" % (
         else:
             auth = self.pm.sync_auth()
             if not auth:
-                sync_login(self, lambda: self._sync_collection_and_media(lambda: None))
+                sync_login(
+                    self,
+                    lambda: self._sync_collection_and_media(self._refresh_after_sync),
+                )
             else:
-                self._sync_collection_and_media(lambda: None)
+                self._sync_collection_and_media(self._refresh_after_sync)
+
+    def _refresh_after_sync(self):
+        self.toolbar.redraw()
 
     def _sync_collection_and_media(self, after_sync: Callable[[], None]):
         "Caller should ensure auth available."
