@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 import base64
@@ -11,7 +10,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import warnings
-from typing import Callable, List, Optional, Tuple
+from random import randrange
+from typing import Any, Callable, Dict, List, Match, Optional, Tuple, cast
 
 import bs4
 import requests
@@ -20,17 +20,21 @@ from bs4 import BeautifulSoup
 import aqt
 import aqt.sound
 from anki.cards import Card
+from anki.collection import Config, SearchNode
+from anki.consts import MODEL_CLOZE
 from anki.hooks import runFilter
 from anki.httpclient import HttpClient
 from anki.notes import Note
-from anki.utils import checksum, isLin, isWin, namedtmp, stripHTMLMedia
-from aqt import AnkiQt, gui_hooks
+from anki.utils import checksum, isLin, isWin, namedtmp
+from aqt import AnkiQt, colors, gui_hooks
 from aqt.main import ResetReason
 from aqt.qt import *
-from aqt.sound import av_player, getAudio
+from aqt.sound import av_player
 from aqt.theme import theme_manager
 from aqt.utils import (
     TR,
+    HelpPage,
+    disable_help_button,
     getFile,
     openHelp,
     qtMenuShortcutWorkaround,
@@ -46,49 +50,51 @@ from aqt.webview import AnkiWebView
 
 pics = ("jpg", "jpeg", "png", "tif", "tiff", "gif", "svg", "webp", "ico")
 audio = (
-    "wav",
-    "mp3",
-    "ogg",
-    "flac",
-    "mp4",
-    "swf",
-    "mov",
-    "mpeg",
-    "mkv",
-    "m4a",
     "3gp",
-    "spx",
-    "oga",
-    "webm",
-    "mpg",
-    "ogx",
     "avi",
+    "flac",
     "flv",
+    "m4a",
+    "mkv",
+    "mov",
+    "mp3",
+    "mp4",
+    "mpeg",
+    "mpg",
+    "oga",
+    "ogg",
     "ogv",
+    "ogx",
+    "opus",
+    "spx",
+    "swf",
+    "wav",
+    "webm",
 )
 
 _html = """
 <style>
-html { background: %s; }
-#topbutsOuter { background: %s; }
+:root {
+    --bg-color: %s;
+}
 </style>
-<div id="topbutsOuter">
-    <div id="topbuts" class="clearfix">
-%s
+<div>
+    <div id="topbutsOuter">
+        %s
     </div>
-</div>
-<div id="fields">
-</div>
-<div id="dupes" style="display:none;">
-    <a href="#" onclick="pycmd('dupes');return false;">
-%s
-    </a>
+    <div id="fields">
+    </div>
+    <div id="dupes" class="is-inactive">
+        <a href="#" onclick="pycmd('dupes');return false;">%s</a>
+    </div>
 </div>
 """
 
 # caller is responsible for resetting note on reset
 class Editor:
-    def __init__(self, mw: AnkiQt, widget, parentWindow, addMode=False) -> None:
+    def __init__(
+        self, mw: AnkiQt, widget: QWidget, parentWindow: QWidget, addMode: bool = False
+    ) -> None:
         self.mw = mw
         self.widget = widget
         self.parentWindow = parentWindow
@@ -106,7 +112,7 @@ class Editor:
     # Initial setup
     ############################################################
 
-    def setupOuter(self):
+    def setupOuter(self) -> None:
         l = QVBoxLayout()
         l.setContentsMargins(0, 0, 0, 0)
         l.setSpacing(0)
@@ -124,7 +130,7 @@ class Editor:
                 None,
                 "fields",
                 tr(TR.EDITING_CUSTOMIZE_FIELDS),
-                tr(TR.EDITING_FIELDS) + "...",
+                f"{tr(TR.EDITING_FIELDS)}...",
                 disables=False,
                 rightside=False,
             ),
@@ -132,7 +138,7 @@ class Editor:
                 None,
                 "cards",
                 tr(TR.EDITING_CUSTOMIZE_CARD_TEMPLATES_CTRLANDL),
-                tr(TR.EDITING_CARDS) + "...",
+                f"{tr(TR.EDITING_CARDS)}...",
                 disables=False,
                 rightside=False,
             ),
@@ -173,19 +179,16 @@ class Editor:
                 "colour",
                 tr(TR.EDITING_SET_FOREGROUND_COLOUR_F7),
                 """
-<div id="forecolor"
-     style="display: inline-block; background: #000; border-radius: 5px;"
-     class="topbut"
->""",
+<span id="forecolor" class="topbut rounded" style="background: #000"></span>
+""",
             ),
             self._addButton(
                 None,
                 "changeCol",
                 tr(TR.EDITING_CHANGE_COLOUR_F8),
                 """
-<div style="display: inline-block; border-radius: 5px;"
-     class="topbut rainbow"
->""",
+<span class="topbut rounded rainbow"></span>
+""",
             ),
             self._addButton(
                 "text_cloze", "cloze", tr(TR.EDITING_CLOZE_DELETION_CTRLANDSHIFTANDC)
@@ -202,10 +205,10 @@ class Editor:
         righttopbtns = runFilter("setupEditorButtons", righttopbtns, self)
 
         topbuts = """
-            <div id="topbutsleft" style="float:left;">
+            <div id="topbutsleft" class="topbuts">
                 %(leftbts)s
             </div>
-            <div id="topbutsright" style="float:right;">
+            <div id="topbutsright" class="topbuts">
                 %(rightbts)s
             </div>
         """ % dict(
@@ -215,16 +218,25 @@ class Editor:
         bgcol = self.mw.app.palette().window().color().name()  # type: ignore
         # then load page
         self.web.stdHtml(
-            _html % (bgcol, bgcol, topbuts, tr(TR.EDITING_SHOW_DUPLICATES)),
-            css=["css/editor.css"],
-            js=["js/vendor/jquery.js", "js/editor.js"],
+            _html % (bgcol, topbuts, tr(TR.EDITING_SHOW_DUPLICATES)),
+            css=[
+                "css/vendor/bootstrap.min.css",
+                "css/vendor/bootstrap-icons.css",
+                "css/editor.css",
+            ],
+            js=[
+                "js/vendor/jquery.min.js",
+                "js/vendor/bootstrap.bundle.min.js",
+                "js/editor.js",
+            ],
             context=self,
         )
+        self.web.eval("preventButtonFocus();")
 
     # Top buttons
     ######################################################################
 
-    def resourceToData(self, path):
+    def resourceToData(self, path: str) -> str:
         """Convert a file (specified by a path) into a data URI."""
         if not os.path.exists(path):
             raise FileNotFoundError
@@ -232,7 +244,7 @@ class Editor:
         with open(path, "rb") as fp:
             data = fp.read()
             data64 = b"".join(base64.encodebytes(data).splitlines())
-            return "data:%s;base64,%s" % (mime, data64.decode("ascii"))
+            return f"data:{mime};base64,{data64.decode('ascii')}"
 
     def addButton(
         self,
@@ -246,16 +258,33 @@ class Editor:
         keys: str = None,
         disables: bool = True,
         rightside: bool = True,
-    ):
+    ) -> str:
         """Assign func to bridge cmd, register shortcut, return button"""
         if func:
             self._links[cmd] = func
-        if keys:
-            QShortcut(  # type: ignore
-                QKeySequence(keys),
-                self.widget,
-                activated=lambda s=self: func(s),
-            )
+
+            if keys:
+
+                def on_activated() -> None:
+                    func(self)
+
+                if toggleable:
+                    # generate a random id for triggering toggle
+                    id = id or str(randrange(1_000_000))
+
+                    def on_hotkey() -> None:
+                        on_activated()
+                        self.web.eval(f'toggleEditorButton("#{id}");')
+
+                else:
+                    on_hotkey = on_activated
+
+                QShortcut(  # type: ignore
+                    QKeySequence(keys),
+                    self.widget,
+                    activated=on_hotkey,
+                )
+
         btn = self._addButton(
             icon,
             cmd,
@@ -285,16 +314,16 @@ class Editor:
             elif os.path.isabs(icon):
                 iconstr = self.resourceToData(icon)
             else:
-                iconstr = "/_anki/imgs/{}.png".format(icon)
-            imgelm = """<img class=topbut src="{}">""".format(iconstr)
+                iconstr = f"/_anki/imgs/{icon}.png"
+            imgelm = f"""<img class="topbut" src="{iconstr}">"""
         else:
             imgelm = ""
         if label or not imgelm:
-            labelelm = """<span class=blabel>{}</span>""".format(label or cmd)
+            labelelm = label or cmd
         else:
             labelelm = ""
         if id:
-            idstr = "id={}".format(id)
+            idstr = f"id={id}"
         else:
             idstr = ""
         if toggleable:
@@ -305,10 +334,10 @@ class Editor:
         if rightside:
             class_ = "linkb"
         else:
-            class_ = ""
+            class_ = "rounded"
         if not disables:
             class_ += " perm"
-        return """ <button tabindex=-1
+        return """<button tabindex=-1
                         {id}
                         class="{class_}"
                         type="button"
@@ -361,26 +390,26 @@ class Editor:
                 keys, fn, _ = row
             QShortcut(QKeySequence(keys), self.widget, activated=fn)  # type: ignore
 
-    def _addFocusCheck(self, fn):
-        def checkFocus():
+    def _addFocusCheck(self, fn: Callable) -> Callable:
+        def checkFocus() -> None:
             if self.currentField is None:
                 return
             fn()
 
         return checkFocus
 
-    def onFields(self):
+    def onFields(self) -> None:
         self.saveNow(self._onFields)
 
-    def _onFields(self):
+    def _onFields(self) -> None:
         from aqt.fields import FieldDialog
 
         FieldDialog(self.mw, self.note.model(), parent=self.parentWindow)
 
-    def onCardLayout(self):
+    def onCardLayout(self) -> None:
         self.saveNow(self._onCardLayout)
 
-    def _onCardLayout(self):
+    def _onCardLayout(self) -> None:
         from aqt.clayout import CardLayout
 
         if self.card:
@@ -400,16 +429,17 @@ class Editor:
     # JS->Python bridge
     ######################################################################
 
-    def onBridgeCmd(self, cmd) -> None:
+    def onBridgeCmd(self, cmd: str) -> Any:
         if not self.note:
             # shutdown
             return
+
         # focus lost or key/button pressed?
         if cmd.startswith("blur") or cmd.startswith("key"):
-            (type, ord, nid, txt) = cmd.split(":", 3)
-            ord = int(ord)
+            (type, ord_str, nid_str, txt) = cmd.split(":", 3)
+            ord = int(ord_str)
             try:
-                nid = int(nid)
+                nid = int(nid_str)
             except ValueError:
                 nid = 0
             if nid != self.note.id:
@@ -419,7 +449,7 @@ class Editor:
             self.note.fields[ord] = self.mungeHTML(txt)
 
             if not self.addMode:
-                self.note.flush()
+                self._save_current_note()
                 self.mw.requireReset(reason=ResetReason.EditorBridgeCmd, context=self)
             if type == "blur":
                 self.currentField = None
@@ -433,23 +463,38 @@ class Editor:
             else:
                 gui_hooks.editor_did_fire_typing_timer(self.note)
                 self.checkValid()
+
         # focused into field?
         elif cmd.startswith("focus"):
             (type, num) = cmd.split(":", 1)
             self.currentField = int(num)
             gui_hooks.editor_did_focus_field(self.note, self.currentField)
+
+        elif cmd.startswith("toggleSticky"):
+            (type, num) = cmd.split(":", 1)
+            ord = int(num)
+
+            fld = self.note.model()["flds"][ord]
+            new_state = not fld["sticky"]
+            fld["sticky"] = new_state
+
+            return new_state
+
         elif cmd in self._links:
             self._links[cmd](self)
+
         else:
             print("uncaught cmd", cmd)
 
-    def mungeHTML(self, txt):
+    def mungeHTML(self, txt: str) -> str:
         return gui_hooks.editor_will_munge_html(txt, self)
 
     # Setting/unsetting the current note
     ######################################################################
 
-    def setNote(self, note, hide=True, focusTo=None):
+    def setNote(
+        self, note: Optional[Note], hide: bool = True, focusTo: Optional[int] = None
+    ) -> None:
         "Make NOTE the current note."
         self.note = note
         self.currentField = None
@@ -460,10 +505,10 @@ class Editor:
             if hide:
                 self.widget.hide()
 
-    def loadNoteKeepingFocus(self):
+    def loadNoteKeepingFocus(self) -> None:
         self.loadNote(self.currentField)
 
-    def loadNote(self, focusTo=None) -> None:
+    def loadNote(self, focusTo: Optional[int] = None) -> None:
         if not self.note:
             return
 
@@ -474,7 +519,7 @@ class Editor:
         self.widget.show()
         self.updateTags()
 
-        def oncallback(arg):
+        def oncallback(arg: Any) -> None:
             if not self.note:
                 return
             self.setupForegroundButton()
@@ -483,14 +528,23 @@ class Editor:
                 self.web.setFocus()
             gui_hooks.editor_did_load_note(self)
 
-        js = "setFields(%s); setFonts(%s); focusField(%s); setNoteId(%s)" % (
+        js = "setFields(%s); setFonts(%s); focusField(%s); setNoteId(%s);" % (
             json.dumps(data),
             json.dumps(self.fonts()),
             json.dumps(focusTo),
             json.dumps(self.note.id),
         )
+
+        if self.addMode:
+            sticky = [field["sticky"] for field in self.note.model()["flds"]]
+            js += " setSticky(%s);" % json.dumps(sticky)
+
         js = gui_hooks.editor_will_load_note(js, self.note, self)
         self.web.evalWithCallback(js, oncallback)
+
+    def _save_current_note(self) -> None:
+        "Call after note is updated with data from webview."
+        self.mw.col.update_note(self.note)
 
     def fonts(self) -> List[Tuple[str, int, bool]]:
         return [
@@ -498,7 +552,7 @@ class Editor:
             for f in self.note.model()["flds"]
         ]
 
-    def saveNow(self, callback, keepFocus=False):
+    def saveNow(self, callback: Callable, keepFocus: bool = False) -> None:
         "Save unsaved edits then call callback()."
         if not self.note:
             # calling code may not expect the callback to fire immediately
@@ -507,25 +561,29 @@ class Editor:
         self.saveTags()
         self.web.evalWithCallback("saveNow(%d)" % keepFocus, lambda res: callback())
 
-    def checkValid(self):
+    def checkValid(self) -> None:
         cols = [""] * len(self.note.fields)
-        err = self.note.dupeOrEmpty()
+        err = self.note.duplicate_or_empty()
         if err == 2:
             cols[0] = "dupe"
-            self.web.eval("showDupes();")
-        else:
-            self.web.eval("hideDupes();")
-        self.web.eval("setBackgrounds(%s);" % json.dumps(cols))
 
-    def showDupes(self):
-        contents = self.note.fields[0].replace('"', r"\"")
-        browser = aqt.dialogs.open("Browser", self.mw)
-        browser.form.searchEdit.lineEdit().setText(
-            '"dupe:%s,%s"' % (self.note.model()["id"], contents)
+        self.web.eval(f"setBackgrounds({json.dumps(cols)});")
+
+    def showDupes(self) -> None:
+        aqt.dialogs.open(
+            "Browser",
+            self.mw,
+            search=(
+                SearchNode(
+                    dupe=SearchNode.Dupe(
+                        notetype_id=self.note.model()["id"],
+                        first_field=self.note.fields[0],
+                    )
+                ),
+            ),
         )
-        browser.onSearchActivated()
 
-    def fieldsAreBlank(self, previousNote=None):
+    def fieldsAreBlank(self, previousNote: Optional[Note] = None) -> bool:
         if not self.note:
             return True
         m = self.note.model()
@@ -538,7 +596,7 @@ class Editor:
                 return False
         return True
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         self.setNote(None)
         # prevent any remaining evalWithCallback() events from firing after C++ object deleted
         self.web = None
@@ -546,16 +604,22 @@ class Editor:
     # HTML editing
     ######################################################################
 
-    def onHtmlEdit(self):
+    def onHtmlEdit(self) -> None:
         field = self.currentField
         self.saveNow(lambda: self._onHtmlEdit(field))
 
-    def _onHtmlEdit(self, field):
+    def _onHtmlEdit(self, field: int) -> None:
         d = QDialog(self.widget, Qt.Window)
         form = aqt.forms.edithtml.Ui_Dialog()
         form.setupUi(d)
         restoreGeom(d, "htmlEditor")
-        qconnect(form.buttonBox.helpRequested, lambda: openHelp("editing?id=features"))
+        disable_help_button(d)
+        qconnect(
+            form.buttonBox.helpRequested, lambda: openHelp(HelpPage.EDITING_FEATURES)
+        )
+        font = QFont("Courier")
+        font.setStyleHint(QFont.TypeWriter)
+        form.textEdit.setFont(font)
         form.textEdit.setPlainText(self.note.fields[field])
         d.show()
         form.textEdit.moveCursor(QTextCursor.End)
@@ -573,14 +637,14 @@ class Editor:
                 )
         self.note.fields[field] = html
         if not self.addMode:
-            self.note.flush()
+            self._save_current_note()
         self.loadNote(focusTo=field)
         saveGeom(d, "htmlEditor")
 
     # Tag handling
     ######################################################################
 
-    def setupTags(self):
+    def setupTags(self) -> None:
         import aqt.tagedit
 
         g = QGroupBox(self.widget)
@@ -596,13 +660,13 @@ class Editor:
         self.tags.setToolTip(
             shortcut(tr(TR.EDITING_JUMP_TO_TAGS_WITH_CTRLANDSHIFTANDT))
         )
-        border = theme_manager.str_color("border")
+        border = theme_manager.color(colors.BORDER)
         self.tags.setStyleSheet(f"border: 1px solid {border}")
         tb.addWidget(self.tags, 1, 1)
         g.setLayout(tb)
         self.outerLayout.addWidget(g)
 
-    def updateTags(self):
+    def updateTags(self) -> None:
         if self.tags.col != self.mw.col:
             self.tags.setCol(self.mw.col)
         if not self.tags.text() or not self.addMode:
@@ -613,49 +677,46 @@ class Editor:
             return
         self.note.tags = self.mw.col.tags.split(self.tags.text())
         if not self.addMode:
-            self.note.flush()
+            self._save_current_note()
         gui_hooks.editor_did_update_tags(self.note)
 
-    def saveAddModeVars(self):
-        if self.addMode:
-            # save tags to model
-            m = self.note.model()
-            m["tags"] = self.note.tags
-            self.mw.col.models.save(m, updateReqs=False)
-
-    def hideCompleters(self):
+    def hideCompleters(self) -> None:
         self.tags.hideCompleter()
 
-    def onFocusTags(self):
+    def onFocusTags(self) -> None:
         self.tags.setFocus()
+
+    # legacy
+    def saveAddModeVars(self) -> None:
+        pass
 
     # Format buttons
     ######################################################################
 
-    def toggleBold(self):
+    def toggleBold(self) -> None:
         self.web.eval("setFormat('bold');")
 
-    def toggleItalic(self):
+    def toggleItalic(self) -> None:
         self.web.eval("setFormat('italic');")
 
-    def toggleUnderline(self):
+    def toggleUnderline(self) -> None:
         self.web.eval("setFormat('underline');")
 
-    def toggleSuper(self):
+    def toggleSuper(self) -> None:
         self.web.eval("setFormat('superscript');")
 
-    def toggleSub(self):
+    def toggleSub(self) -> None:
         self.web.eval("setFormat('subscript');")
 
-    def removeFormat(self):
+    def removeFormat(self) -> None:
         self.web.eval("setFormat('removeFormat');")
 
-    def onCloze(self):
+    def onCloze(self) -> None:
         self.saveNow(self._onCloze, keepFocus=True)
 
-    def _onCloze(self):
+    def _onCloze(self) -> None:
         # check that the model is set up for cloze deletion
-        if not re.search("{{(.*:)*cloze:", self.note.model()["tmpls"][0]["qfmt"]):
+        if self.note.model()["type"] != MODEL_CLOZE:
             if self.addMode:
                 tooltip(tr(TR.EDITING_WARNING_CLOZE_DELETIONS_WILL_NOT_WORK))
             else:
@@ -677,16 +738,16 @@ class Editor:
     # Foreground colour
     ######################################################################
 
-    def setupForegroundButton(self):
+    def setupForegroundButton(self) -> None:
         self.fcolour = self.mw.pm.profile.get("lastColour", "#00f")
         self.onColourChanged()
 
     # use last colour
-    def onForeground(self):
+    def onForeground(self) -> None:
         self._wrapWithColour(self.fcolour)
 
     # choose new colour
-    def onChangeCol(self):
+    def onChangeCol(self) -> None:
         if isLin:
             new = QColorDialog.getColor(
                 QColor(self.fcolour), None, None, QColorDialog.DontUseNativeDialog
@@ -700,68 +761,63 @@ class Editor:
             self.onColourChanged()
             self._wrapWithColour(self.fcolour)
 
-    def _updateForegroundButton(self):
-        self.web.eval("setFGButton('%s')" % self.fcolour)
+    def _updateForegroundButton(self) -> None:
+        self.web.eval(f"setFGButton('{self.fcolour}')")
 
-    def onColourChanged(self):
+    def onColourChanged(self) -> None:
         self._updateForegroundButton()
         self.mw.pm.profile["lastColour"] = self.fcolour
 
-    def _wrapWithColour(self, colour):
-        self.web.eval("setFormat('forecolor', '%s')" % colour)
+    def _wrapWithColour(self, colour: str) -> None:
+        self.web.eval(f"setFormat('forecolor', '{colour}')")
 
     # Audio/video/images
     ######################################################################
 
-    def onAddMedia(self):
+    def onAddMedia(self) -> None:
         extension_filter = " ".join(
-            "*." + extension for extension in sorted(itertools.chain(pics, audio))
+            f"*.{extension}" for extension in sorted(itertools.chain(pics, audio))
         )
-        key = tr(TR.EDITING_MEDIA) + " (" + extension_filter + ")"
+        filter = f"{tr(TR.EDITING_MEDIA)} ({extension_filter})"
 
-        def accept(file):
-            self.addMedia(file, canDelete=True)
+        def accept(file: str) -> None:
+            self.addMedia(file)
 
-        file = getFile(self.widget, tr(TR.EDITING_ADD_MEDIA), accept, key, key="media")
+        file = getFile(
+            parent=self.widget,
+            title=tr(TR.EDITING_ADD_MEDIA),
+            cb=cast(Callable[[Any], None], accept),
+            filter=filter,
+            key="media",
+        )
         self.parentWindow.activateWindow()
 
-    def addMedia(self, path, canDelete=False):
+    def addMedia(self, path: str, canDelete: bool = False) -> None:
+        """canDelete is a legacy arg and is ignored."""
         try:
-            html = self._addMedia(path, canDelete)
+            html = self._addMedia(path)
         except Exception as e:
             showWarning(str(e))
             return
-        self.web.eval("insertHtmlRemovingInitialBR(%s);" % json.dumps(html))
+        self.web.eval(f"setFormat('inserthtml', {json.dumps(html)});")
 
-    def _addMedia(self, path, canDelete=False):
-        "Add to media folder and return local img or sound tag."
+    def _addMedia(self, path: str, canDelete: bool = False) -> str:
+        """Add to media folder and return local img or sound tag."""
         # copy to media folder
         fname = self.mw.col.media.addFile(path)
-        # remove original?
-        if canDelete and self.mw.pm.profile["deleteMedia"]:
-            if os.path.abspath(fname) != os.path.abspath(path):
-                try:
-                    os.unlink(path)
-                except:
-                    pass
         # return a local html link
         return self.fnameToLink(fname)
 
     def _addMediaFromData(self, fname: str, data: bytes) -> str:
         return self.mw.col.media.writeData(fname, data)
 
-    def onRecSound(self):
-        try:
-            file = getAudio(self.widget)
-        except Exception as e:
-            showWarning(
-                tr(TR.EDITING_COULDNT_RECORD_AUDIO_HAVE_YOU_INSTALLED)
-                + "\n\n"
-                + repr(str(e))
-            )
-            return
-        if file:
-            self.addMedia(file)
+    def onRecSound(self) -> None:
+        aqt.sound.record_audio(
+            self.parentWindow,
+            self.mw,
+            True,
+            lambda file: self.addMedia(file, canDelete=True),
+        )
 
     # Media downloads
     ######################################################################
@@ -776,20 +832,20 @@ class Editor:
         ext = fname.split(".")[-1].lower()
         if ext in pics:
             name = urllib.parse.quote(fname.encode("utf8"))
-            return '<img src="%s">' % name
+            return f'<img src="{name}">'
         else:
             av_player.play_file(fname)
-            return "[sound:%s]" % html.escape(fname, quote=False)
+            return f"[sound:{html.escape(fname, quote=False)}]"
 
     def urlToFile(self, url: str) -> Optional[str]:
         l = url.lower()
         for suffix in pics + audio:
-            if l.endswith("." + suffix):
+            if l.endswith(f".{suffix}"):
                 return self._retrieveURL(url)
         # not a supported type
         return None
 
-    def isURL(self, s):
+    def isURL(self, s: str) -> bool:
         s = s.lower()
         return (
             s.startswith("http://")
@@ -808,7 +864,7 @@ class Editor:
                 data = base64.b64decode(b64data, validate=True)
                 if ext == "jpeg":
                     ext = "jpg"
-                return self._addPastedImage(data, "." + ext)
+                return self._addPastedImage(data, f".{ext}")
 
         return ""
 
@@ -823,7 +879,7 @@ class Editor:
     def _addPastedImage(self, data: bytes, ext: str) -> str:
         # hash and write
         csum = checksum(data)
-        fname = "{}-{}{}".format("paste", csum, ext)
+        fname = f"paste-{csum}{ext}"
         return self._addMediaFromData(fname, data)
 
     def _retrieveURL(self, url: str) -> Optional[str]:
@@ -933,28 +989,26 @@ class Editor:
             ext = "true"
         else:
             ext = "false"
-        self.web.eval(
-            "pasteHTML(%s, %s, %s);" % (json.dumps(html), json.dumps(internal), ext)
-        )
+        self.web.eval(f"pasteHTML({json.dumps(html)}, {json.dumps(internal)}, {ext});")
 
     def doDrop(self, html: str, internal: bool, extended: bool = False) -> None:
-        def pasteIfField(ret):
+        def pasteIfField(ret: bool) -> None:
             if ret:
                 self.doPaste(html, internal, extended)
 
         p = self.web.mapFromGlobal(QCursor.pos())
         self.web.evalWithCallback(f"focusIfField({p.x()}, {p.y()});", pasteIfField)
 
-    def onPaste(self):
+    def onPaste(self) -> None:
         self.web.onPaste()
 
-    def onCutOrCopy(self):
+    def onCutOrCopy(self) -> None:
         self.web.flagAnkiText()
 
     # Advanced menu
     ######################################################################
 
-    def onAdvanced(self):
+    def onAdvanced(self) -> None:
         m = QMenu(self.mw)
 
         for text, handler, shortcut in (
@@ -981,28 +1035,28 @@ class Editor:
     # LaTeX
     ######################################################################
 
-    def insertLatex(self):
+    def insertLatex(self) -> None:
         self.web.eval("wrap('[latex]', '[/latex]');")
 
-    def insertLatexEqn(self):
+    def insertLatexEqn(self) -> None:
         self.web.eval("wrap('[$]', '[/$]');")
 
-    def insertLatexMathEnv(self):
+    def insertLatexMathEnv(self) -> None:
         self.web.eval("wrap('[$$]', '[/$$]');")
 
-    def insertMathjaxInline(self):
+    def insertMathjaxInline(self) -> None:
         self.web.eval("wrap('\\\\(', '\\\\)');")
 
-    def insertMathjaxBlock(self):
+    def insertMathjaxBlock(self) -> None:
         self.web.eval("wrap('\\\\[', '\\\\]');")
 
-    def insertMathjaxChemistry(self):
+    def insertMathjaxChemistry(self) -> None:
         self.web.eval("wrap('\\\\(\\\\ce{', '}\\\\)');")
 
     # Links from HTML
     ######################################################################
 
-    _links = dict(
+    _links: Dict[str, Callable] = dict(
         fields=onFields,
         cards=onCardLayout,
         bold=toggleBold,
@@ -1028,32 +1082,33 @@ class Editor:
 
 
 class EditorWebView(AnkiWebView):
-    def __init__(self, parent, editor):
+    def __init__(self, parent: QWidget, editor: Editor) -> None:
         AnkiWebView.__init__(self, title="editor")
         self.editor = editor
-        self.strip = self.editor.mw.pm.profile["stripHTML"]
         self.setAcceptDrops(True)
         self._markInternal = False
         clip = self.editor.mw.app.clipboard()
         qconnect(clip.dataChanged, self._onClipboardChange)
         gui_hooks.editor_web_view_did_init(self)
 
-    def _onClipboardChange(self):
+    def _onClipboardChange(self) -> None:
         if self._markInternal:
             self._markInternal = False
             self._flagAnkiText()
 
-    def onCut(self):
+    def onCut(self) -> None:
         self.triggerPageAction(QWebEnginePage.Cut)
 
-    def onCopy(self):
+    def onCopy(self) -> None:
         self.triggerPageAction(QWebEnginePage.Copy)
 
     def _wantsExtendedPaste(self) -> bool:
-        extended = not (self.editor.mw.app.queryKeyboardModifiers() & Qt.ShiftModifier)
-        if self.editor.mw.pm.profile.get("pasteInvert", False):
-            extended = not extended
-        return extended
+        strip_html = self.editor.mw.col.get_config_bool(
+            Config.Bool.PASTE_STRIPS_FORMATTING
+        )
+        if self.editor.mw.app.queryKeyboardModifiers() & Qt.ShiftModifier:
+            strip_html = not strip_html
+        return strip_html
 
     def _onPaste(self, mode: QClipboard.Mode) -> None:
         extended = self._wantsExtendedPaste()
@@ -1069,10 +1124,10 @@ class EditorWebView(AnkiWebView):
     def onMiddleClickPaste(self) -> None:
         self._onPaste(QClipboard.Selection)
 
-    def dragEnterEvent(self, evt):
+    def dragEnterEvent(self, evt: QDragEnterEvent) -> None:
         evt.accept()
 
-    def dropEvent(self, evt):
+    def dropEvent(self, evt: QDropEvent) -> None:
         extended = self._wantsExtendedPaste()
         mime = evt.mimeData()
 
@@ -1153,8 +1208,8 @@ class EditorWebView(AnkiWebView):
                     token = html.escape(token).replace("\t", " " * 4)
                     # if there's more than one consecutive space,
                     # use non-breaking spaces for the second one on
-                    def repl(match):
-                        return match.group(1).replace(" ", "&nbsp;") + " "
+                    def repl(match: Match) -> str:
+                        return f"{match.group(1).replace(' ', '&nbsp;')} "
 
                     token = re.sub(" ( +)", repl, token)
                     processed.append(token)
@@ -1180,7 +1235,7 @@ class EditorWebView(AnkiWebView):
             return None
         im = QImage(mime.imageData())
         uname = namedtmp("paste")
-        if self.editor.mw.pm.profile.get("pastePNG", False):
+        if self.editor.mw.col.get_config_bool(Config.Bool.PASTE_IMAGES_AS_PNG):
             ext = ".png"
             im.save(uname + ext, None, 50)
         else:
@@ -1199,11 +1254,11 @@ class EditorWebView(AnkiWebView):
             return self.editor.fnameToLink(fname)
         return None
 
-    def flagAnkiText(self):
+    def flagAnkiText(self) -> None:
         # be ready to adjust when clipboard event fires
         self._markInternal = True
 
-    def _flagAnkiText(self):
+    def _flagAnkiText(self) -> None:
         # add a comment in the clipboard html so we can tell text is copied
         # from us and doesn't need to be stripped
         clip = self.editor.mw.app.clipboard()
@@ -1213,7 +1268,7 @@ class EditorWebView(AnkiWebView):
         if not mime.hasHtml():
             return
         html = mime.html()
-        mime.setHtml("<!--anki-->" + html)
+        mime.setHtml(f"<!--anki-->{html}")
         clip.setMimeData(mime)
 
     def contextMenuEvent(self, evt: QContextMenuEvent) -> None:
@@ -1231,20 +1286,20 @@ class EditorWebView(AnkiWebView):
 # QFont returns "Kozuka Gothic Pro L" but WebEngine expects "Kozuka Gothic Pro Light"
 # - there may be other cases like a trailing 'Bold' that need fixing, but will
 # wait for further reports first.
-def fontMungeHack(font):
+def fontMungeHack(font: str) -> str:
     return re.sub(" L$", " Light", font)
 
 
-def munge_html(txt, editor):
+def munge_html(txt: str, editor: Editor) -> str:
     return "" if txt in ("<br>", "<div><br></div>") else txt
 
 
-def remove_null_bytes(txt, editor):
+def remove_null_bytes(txt: str, editor: Editor) -> str:
     # misbehaving apps may include a null byte in the text
     return txt.replace("\x00", "")
 
 
-def reverse_url_quoting(txt, editor):
+def reverse_url_quoting(txt: str, editor: Editor) -> str:
     # reverse the url quoting we added to get images to display
     return editor.mw.col.media.escape_media_filenames(txt, unescape=True)
 

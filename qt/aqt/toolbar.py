@@ -1,12 +1,11 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
 import aqt
-from anki.rsbackend import SyncStatus
+from anki.sync import SyncStatus
 from aqt import gui_hooks
 from aqt.qt import *
 from aqt.sync import get_sync_status
@@ -48,7 +47,7 @@ class Toolbar:
         self.web.stdHtml(
             self._body % self._centerLinks(),
             css=["css/toolbar.css"],
-            js=["js/webview.js", "js/vendor/jquery.js", "js/toolbar.js"],
+            js=["js/webview.js", "js/vendor/jquery.min.js", "js/toolbar.js"],
             context=web_context,
         )
         self.web.adjustHeightToFit()

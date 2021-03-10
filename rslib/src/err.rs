@@ -3,10 +3,12 @@
 
 use crate::i18n::{tr_args, tr_strs, I18n, TR};
 pub use failure::{Error, Fail};
+use nom::error::{ErrorKind as NomErrorKind, ParseError as NomParseError};
 use reqwest::StatusCode;
-use std::{io, str::Utf8Error};
+use std::{io, num::ParseIntError, str::Utf8Error};
+use tempfile::PathPersistError;
 
-pub type Result<T> = std::result::Result<T, AnkiError>;
+pub type Result<T, E = AnkiError> = std::result::Result<T, E>;
 
 #[derive(Debug, Fail, PartialEq)]
 pub enum AnkiError {
@@ -40,6 +42,9 @@ pub enum AnkiError {
     #[fail(display = "Protobuf encode/decode error: {}", info)]
     ProtoError { info: String },
 
+    #[fail(display = "Unable to parse number")]
+    ParseNumError,
+
     #[fail(display = "The user interrupted the operation.")]
     Interrupted,
 
@@ -59,7 +64,7 @@ pub enum AnkiError {
     DeckIsFiltered,
 
     #[fail(display = "Invalid search.")]
-    SearchError(Option<String>),
+    SearchError(SearchErrorKind),
 }
 
 // error helpers
@@ -94,6 +99,8 @@ impl AnkiError {
                 SyncErrorKind::ResyncRequired => i18n.tr(TR::SyncResyncRequired),
                 SyncErrorKind::ClockIncorrect => i18n.tr(TR::SyncClockOff),
                 SyncErrorKind::DatabaseCheckRequired => i18n.tr(TR::SyncSanityCheckFailed),
+                // server message
+                SyncErrorKind::SyncNotStarted => "sync not started".into(),
             }
             .into(),
             AnkiError::NetworkError { kind, info } => {
@@ -119,13 +126,89 @@ impl AnkiError {
                 DBErrorKind::Locked => "Anki already open, or media currently syncing.".into(),
                 _ => format!("{:?}", self),
             },
-            AnkiError::SearchError(details) => {
-                if let Some(details) = details {
-                    details.to_owned()
+            AnkiError::SearchError(kind) => {
+                let reason = match kind {
+                    SearchErrorKind::MisplacedAnd => i18n.tr(TR::SearchMisplacedAnd),
+                    SearchErrorKind::MisplacedOr => i18n.tr(TR::SearchMisplacedOr),
+                    SearchErrorKind::EmptyGroup => i18n.tr(TR::SearchEmptyGroup),
+                    SearchErrorKind::UnopenedGroup => i18n.tr(TR::SearchUnopenedGroup),
+                    SearchErrorKind::UnclosedGroup => i18n.tr(TR::SearchUnclosedGroup),
+                    SearchErrorKind::EmptyQuote => i18n.tr(TR::SearchEmptyQuote),
+                    SearchErrorKind::UnclosedQuote => i18n.tr(TR::SearchUnclosedQuote),
+                    SearchErrorKind::MissingKey => i18n.tr(TR::SearchMissingKey),
+                    SearchErrorKind::UnknownEscape(ctx) => i18n
+                        .trn(
+                            TR::SearchUnknownEscape,
+                            tr_strs!["val"=>(htmlescape::encode_minimal(ctx))],
+                        )
+                        .into(),
+                    SearchErrorKind::InvalidState(state) => i18n
+                        .trn(
+                            TR::SearchInvalidArgument,
+                            tr_strs!("term" => "is:", "argument" => state),
+                        )
+                        .into(),
+                    SearchErrorKind::InvalidFlag => i18n.tr(TR::SearchInvalidFlag),
+                    SearchErrorKind::InvalidPropProperty(prop) => i18n
+                        .trn(
+                            TR::SearchInvalidArgument,
+                            tr_strs!("term" => "prop:", "argument" => prop),
+                        )
+                        .into(),
+                    SearchErrorKind::InvalidPropOperator(ctx) => i18n
+                        .trn(TR::SearchInvalidPropOperator, tr_strs!["val"=>(ctx)])
+                        .into(),
+                    SearchErrorKind::Regex(text) => text.into(),
+                    SearchErrorKind::Other(Some(info)) => info.into(),
+                    SearchErrorKind::Other(None) => i18n.tr(TR::SearchInvalidOther),
+                    SearchErrorKind::InvalidNumber { provided, context } => i18n
+                        .trn(
+                            TR::SearchInvalidNumber,
+                            tr_strs!["provided"=>provided, "context"=>context],
+                        )
+                        .into(),
+                    SearchErrorKind::InvalidWholeNumber { provided, context } => i18n
+                        .trn(
+                            TR::SearchInvalidWholeNumber,
+                            tr_strs!["provided"=>provided, "context"=>context],
+                        )
+                        .into(),
+                    SearchErrorKind::InvalidPositiveWholeNumber { provided, context } => i18n
+                        .trn(
+                            TR::SearchInvalidPositiveWholeNumber,
+                            tr_strs!["provided"=>provided, "context"=>context],
+                        )
+                        .into(),
+                    SearchErrorKind::InvalidNegativeWholeNumber { provided, context } => i18n
+                        .trn(
+                            TR::SearchInvalidNegativeWholeNumber,
+                            tr_strs!["provided"=>provided, "context"=>context],
+                        )
+                        .into(),
+                    SearchErrorKind::InvalidAnswerButton { provided, context } => i18n
+                        .trn(
+                            TR::SearchInvalidAnswerButton,
+                            tr_strs!["provided"=>provided, "context"=>context],
+                        )
+                        .into(),
+                };
+                i18n.trn(
+                    TR::SearchInvalidSearch,
+                    tr_args!("reason" => reason.into_owned()),
+                )
+            }
+            AnkiError::InvalidInput { info } => {
+                if info.is_empty() {
+                    i18n.tr(TR::ErrorsInvalidInputEmpty).into()
                 } else {
-                    i18n.tr(TR::SearchInvalid).to_string()
+                    i18n.trn(
+                        TR::ErrorsInvalidInputDetails,
+                        tr_args!("details" => info.to_owned()),
+                    )
                 }
             }
+            AnkiError::ParseNumError => i18n.tr(TR::ErrorsParseNumberFail).into(),
+            AnkiError::DeckIsFiltered => i18n.tr(TR::ErrorsFilteredParentDeck).into(),
             _ => format!("{:?}", self),
         }
     }
@@ -163,7 +246,7 @@ impl From<rusqlite::Error> for AnkiError {
                 };
             }
             if reason.contains("regex parse error") {
-                return AnkiError::SearchError(Some(reason.to_owned()));
+                return AnkiError::SearchError(SearchErrorKind::Regex(reason.to_owned()));
             }
         }
         AnkiError::DBError {
@@ -229,6 +312,7 @@ pub enum SyncErrorKind {
     Other,
     ResyncRequired,
     DatabaseCheckRequired,
+    SyncNotStarted,
 }
 
 fn error_for_status_code(info: String, code: StatusCode) -> AnkiError {
@@ -256,6 +340,10 @@ fn error_for_status_code(info: String, code: StatusCode) -> AnkiError {
                 kind: SyncErrorKind::ServerError,
             }
         }
+        S::BAD_REQUEST => AnkiError::SyncError {
+            info,
+            kind: SyncErrorKind::DatabaseCheckRequired,
+        },
         _ => AnkiError::NetworkError {
             info,
             kind: NetworkErrorKind::Other,
@@ -326,4 +414,77 @@ pub enum DBErrorKind {
     Locked,
     Utf8,
     Other,
+}
+
+impl From<PathPersistError> for AnkiError {
+    fn from(e: PathPersistError) -> Self {
+        AnkiError::IOError {
+            info: e.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ParseError<'a> {
+    Anki(&'a str, SearchErrorKind),
+    Nom(&'a str, NomErrorKind),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SearchErrorKind {
+    MisplacedAnd,
+    MisplacedOr,
+    EmptyGroup,
+    UnopenedGroup,
+    UnclosedGroup,
+    EmptyQuote,
+    UnclosedQuote,
+    MissingKey,
+    UnknownEscape(String),
+    InvalidState(String),
+    InvalidFlag,
+    InvalidPropProperty(String),
+    InvalidPropOperator(String),
+    InvalidNumber { provided: String, context: String },
+    InvalidWholeNumber { provided: String, context: String },
+    InvalidPositiveWholeNumber { provided: String, context: String },
+    InvalidNegativeWholeNumber { provided: String, context: String },
+    InvalidAnswerButton { provided: String, context: String },
+    Regex(String),
+    Other(Option<String>),
+}
+
+impl From<ParseError<'_>> for AnkiError {
+    fn from(err: ParseError) -> Self {
+        match err {
+            ParseError::Anki(_, kind) => AnkiError::SearchError(kind),
+            ParseError::Nom(_, _) => AnkiError::SearchError(SearchErrorKind::Other(None)),
+        }
+    }
+}
+
+impl From<nom::Err<ParseError<'_>>> for AnkiError {
+    fn from(err: nom::Err<ParseError<'_>>) -> Self {
+        match err {
+            nom::Err::Error(e) => e.into(),
+            nom::Err::Failure(e) => e.into(),
+            nom::Err::Incomplete(_) => AnkiError::SearchError(SearchErrorKind::Other(None)),
+        }
+    }
+}
+
+impl<'a> NomParseError<&'a str> for ParseError<'a> {
+    fn from_error_kind(input: &'a str, kind: NomErrorKind) -> Self {
+        ParseError::Nom(input, kind)
+    }
+
+    fn append(_: &str, _: NomErrorKind, other: Self) -> Self {
+        other
+    }
+}
+
+impl From<ParseIntError> for AnkiError {
+    fn from(_err: ParseIntError) -> Self {
+        AnkiError::ParseNumError
+    }
 }

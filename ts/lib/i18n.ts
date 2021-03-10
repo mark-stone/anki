@@ -59,6 +59,13 @@ export class I18n {
         }
     }
 
+    weekdayLabel(n: number): string {
+        const firstLang = this.bundles[0].locales[0];
+        return new Date(86_400_000 * (3 + n)).toLocaleDateString(firstLang, {
+            weekday: "narrow",
+        });
+    }
+
     private keyName(msg: pb.FluentProto.FluentString): string {
         return this.TR[msg].toLowerCase().replace(/_/g, "-");
     }
@@ -73,9 +80,11 @@ export async function setupI18n(): Promise<I18n> {
     }
     const json = await resp.json();
 
-    for (const resourceText of json.resources) {
-        const bundle = new FluentBundle(json.langs);
-        const resource = new FluentResource(resourceText);
+    for (const i in json.resources) {
+        const text = json.resources[i];
+        const lang = json.langs[i];
+        const bundle = new FluentBundle([lang, "en-US"]);
+        const resource = new FluentResource(text);
         bundle.addResource(resource);
         i18n.bundles.push(bundle);
     }

@@ -13,7 +13,7 @@ from zipfile import ZipFile
 
 from anki import hooks
 from anki.collection import Collection
-from anki.rsbackend import TR
+from anki.lang import TR
 from anki.utils import ids2str, namedtmp, splitFields, stripHTML
 
 
@@ -199,7 +199,7 @@ class AnkiExporter(Exporter):
         # create a new collection at the target
         try:
             os.unlink(path)
-        except (IOError, OSError):
+        except OSError:
             pass
         self.dst = Collection(path)
         self.src = self.col
@@ -296,7 +296,6 @@ class AnkiExporter(Exporter):
         self.dst.crt = self.src.crt
         # todo: tags?
         self.count = self.dst.cardCount()
-        self.dst.setMod()
         self.postExport()
         self.dst.close(downgrade=True)
 

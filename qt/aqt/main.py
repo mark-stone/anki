@@ -1,5 +1,4 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
 
@@ -13,8 +12,9 @@ import time
 import weakref
 import zipfile
 from argparse import Namespace
+from concurrent.futures import Future
 from threading import Thread
-from typing import Any, Callable, List, Optional, Sequence, TextIO, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Sequence, TextIO, Tuple, cast
 
 import anki
 import aqt
@@ -26,12 +26,12 @@ import aqt.stats
 import aqt.toolbar
 import aqt.webview
 from anki import hooks
-from anki.collection import Collection
+from anki._backend import RustBackend as _RustBackend
+from anki.collection import BackendUndo, Checkpoint, Collection, Config, ReviewUndo
 from anki.decks import Deck
 from anki.hooks import runHook
-from anki.lang import without_unicode_isolation
-from anki.rsbackend import RustBackend
 from anki.sound import AVTag, SoundOrVideoTag
+from anki.types import assert_exhaustive
 from anki.utils import devMode, ids2str, intTime, isMac, isWin, splitFields
 from aqt import gui_hooks
 from aqt.addons import DownloadLogEntry, check_and_prompt_for_updates, show_log_to_user
@@ -48,8 +48,10 @@ from aqt.taskman import TaskManager
 from aqt.theme import theme_manager
 from aqt.utils import (
     TR,
+    HelpPage,
     askUser,
     checkInvalidFilename,
+    disable_help_button,
     getFile,
     getOnlyText,
     openHelp,
@@ -69,20 +71,23 @@ install_pylib_legacy()
 
 
 class ResetReason(enum.Enum):
+    Unknown = "unknown"
     AddCardsAddNote = "addCardsAddNote"
     EditCurrentInit = "editCurrentInit"
     EditorBridgeCmd = "editorBridgeCmd"
     BrowserSetDeck = "browserSetDeck"
     BrowserAddTags = "browserAddTags"
+    BrowserRemoveTags = "browserRemoveTags"
     BrowserSuspend = "browserSuspend"
     BrowserReposition = "browserReposition"
     BrowserReschedule = "browserReschedule"
     BrowserFindReplace = "browserFindReplace"
     BrowserTagDupes = "browserTagDupes"
+    BrowserDeleteDeck = "browserDeleteDeck"
 
 
 class ResetRequired:
-    def __init__(self, mw: AnkiQt):
+    def __init__(self, mw: AnkiQt) -> None:
         self.mw = mw
 
 
@@ -96,7 +101,7 @@ class AnkiQt(QMainWindow):
         self,
         app: QApplication,
         profileManager: ProfileManagerType,
-        backend: RustBackend,
+        backend: _RustBackend,
         opts: Namespace,
         args: List[Any],
     ) -> None:
@@ -134,7 +139,7 @@ class AnkiQt(QMainWindow):
         else:
             fn = self.setupProfile
 
-        def on_window_init():
+        def on_window_init() -> None:
             fn()
             gui_hooks.main_window_did_init()
 
@@ -143,7 +148,7 @@ class AnkiQt(QMainWindow):
     def setupUI(self) -> None:
         self.col = None
         self.setupCrashLog()
-        self.disableGC()
+        self.disable_automatic_garbage_collection()
         self.setupAppMsg()
         self.setupKeys()
         self.setupThreads()
@@ -170,7 +175,7 @@ class AnkiQt(QMainWindow):
         "Actions that are deferred until after add-on loading."
         self.toolbar.draw()
 
-    def setupProfileAfterWebviewsLoaded(self):
+    def setupProfileAfterWebviewsLoaded(self) -> None:
         for w in (self.web, self.bottomWeb):
             if not w._domDone:
                 self.progress.timer(
@@ -201,7 +206,7 @@ class AnkiQt(QMainWindow):
                 self.onClose.emit()  # type: ignore
             evt.accept()
 
-        def closeWithoutQuitting(self):
+        def closeWithoutQuitting(self) -> None:
             self.closeFires = False
             self.close()
             self.closeFires = True
@@ -268,12 +273,12 @@ class AnkiQt(QMainWindow):
             # called on .clear()
             return
         name = self.pm.profiles()[n]
-        f = self.profileForm
         self.pm.load(name)
 
-    def openProfile(self):
+    def openProfile(self) -> None:
         name = self.pm.profiles()[self.profileForm.profiles.currentRow()]
-        return self.pm.load(name)
+        self.pm.load(name)
+        return
 
     def onOpenProfile(self) -> None:
         self.profileDiag.hide()
@@ -284,34 +289,37 @@ class AnkiQt(QMainWindow):
     def profileNameOk(self, name: str) -> bool:
         return not checkInvalidFilename(name) and name != "addons21"
 
-    def onAddProfile(self):
+    def onAddProfile(self) -> None:
         name = getOnlyText(tr(TR.ACTIONS_NAME)).strip()
         if name:
             if name in self.pm.profiles():
-                return showWarning(tr(TR.QT_MISC_NAME_EXISTS))
+                showWarning(tr(TR.QT_MISC_NAME_EXISTS))
+                return
             if not self.profileNameOk(name):
                 return
             self.pm.create(name)
             self.pm.name = name
             self.refreshProfilesList()
 
-    def onRenameProfile(self):
+    def onRenameProfile(self) -> None:
         name = getOnlyText(tr(TR.ACTIONS_NEW_NAME), default=self.pm.name).strip()
         if not name:
             return
         if name == self.pm.name:
             return
         if name in self.pm.profiles():
-            return showWarning(tr(TR.QT_MISC_NAME_EXISTS))
+            showWarning(tr(TR.QT_MISC_NAME_EXISTS))
+            return
         if not self.profileNameOk(name):
             return
         self.pm.rename(name)
         self.refreshProfilesList()
 
-    def onRemProfile(self):
+    def onRemProfile(self) -> None:
         profs = self.pm.profiles()
         if len(profs) < 2:
-            return showWarning(tr(TR.QT_MISC_THERE_MUST_BE_AT_LEAST_ONE))
+            showWarning(tr(TR.QT_MISC_THERE_MUST_BE_AT_LEAST_ONE))
+            return
         # sure?
         if not askUser(
             tr(TR.QT_MISC_ALL_CARDS_NOTES_AND_MEDIA_FOR),
@@ -322,7 +330,7 @@ class AnkiQt(QMainWindow):
         self.pm.remove(self.pm.name)
         self.refreshProfilesList()
 
-    def onOpenBackup(self):
+    def onOpenBackup(self) -> None:
         if not askUser(
             tr(TR.QT_MISC_REPLACE_YOUR_COLLECTION_WITH_AN_EARLIER),
             msgfunc=QMessageBox.warning,
@@ -330,18 +338,18 @@ class AnkiQt(QMainWindow):
         ):
             return
 
-        def doOpen(path):
+        def doOpen(path: str) -> None:
             self._openBackup(path)
 
         getFile(
             self.profileDiag,
             tr(TR.QT_MISC_REVERT_TO_BACKUP),
-            cb=doOpen,
+            cb=doOpen,  # type: ignore
             filter="*.colpkg",
             dir=self.pm.backupFolder(),
         )
 
-    def _openBackup(self, path):
+    def _openBackup(self, path: str) -> None:
         try:
             # move the existing collection to the trash, as it may not open
             self.pm.trashCollection()
@@ -356,14 +364,14 @@ class AnkiQt(QMainWindow):
 
         self.onOpenProfile()
 
-    def _on_downgrade(self):
+    def _on_downgrade(self) -> None:
         self.progress.start()
         profiles = self.pm.profiles()
 
-        def downgrade():
+        def downgrade() -> List[str]:
             return self.pm.downgrade(profiles)
 
-        def on_done(future):
+        def on_done(future: Future) -> None:
             self.progress.finish()
             problems = future.result()
             if not problems:
@@ -383,14 +391,12 @@ class AnkiQt(QMainWindow):
         if not self.loadCollection():
             return
 
-        self.pm.apply_profile_options()
-
         # show main window
         if self.pm.profile["mainWindowState"]:
             restoreGeom(self, "mainWindow")
             restoreState(self, "mainWindow")
         # titlebar
-        self.setWindowTitle(self.pm.name + " - Anki")
+        self.setWindowTitle(f"{self.pm.name} - Anki")
         # show and raise window for osx
         self.show()
         self.activateWindow()
@@ -405,7 +411,7 @@ class AnkiQt(QMainWindow):
             self.pendingImport = None
         gui_hooks.profile_did_open()
 
-        def _onsuccess():
+        def _onsuccess() -> None:
             self._refresh_after_sync()
             if onsuccess:
                 onsuccess()
@@ -413,7 +419,7 @@ class AnkiQt(QMainWindow):
         self.maybe_auto_sync_on_open_close(_onsuccess)
 
     def unloadProfile(self, onsuccess: Callable) -> None:
-        def callback():
+        def callback() -> None:
             self._unloadProfile()
             onsuccess()
 
@@ -438,12 +444,12 @@ class AnkiQt(QMainWindow):
                 if getattr(w, "silentlyClose", None):
                     w.close()
                 else:
-                    print("Window should have been closed: {}".format(w))
+                    print(f"Window should have been closed: {w}")
 
     def unloadProfileAndExit(self) -> None:
         self.unloadProfile(self.cleanupAndExit)
 
-    def unloadProfileAndShowProfileManager(self):
+    def unloadProfileAndShowProfileManager(self) -> None:
         self.unloadProfile(self.showProfileManager)
 
     def cleanupAndExit(self) -> None:
@@ -459,10 +465,10 @@ class AnkiQt(QMainWindow):
 
     def _add_play_buttons(self, text: str) -> str:
         "Return card text with play buttons added, or stripped."
-        if self.pm.profile.get("showPlayButtons", True):
-            return aqt.sound.av_refs_to_play_icons(text)
-        else:
+        if self.col.get_config_bool(Config.Bool.HIDE_AUDIO_PLAY_BUTTONS):
             return anki.sound.strip_av_refs(text)
+        else:
+            return aqt.sound.av_refs_to_play_icons(text)
 
     def prepare_card_text_for_display(self, text: str) -> str:
         text = self.col.media.escape_media_filenames(text)
@@ -482,7 +488,7 @@ class AnkiQt(QMainWindow):
                 )
             else:
                 showWarning(
-                    tr(TR.ERRORS_UNABLE_OPEN_COLLECTION) + "\n" + traceback.format_exc()
+                    f"{tr(TR.ERRORS_UNABLE_OPEN_COLLECTION)}\n{traceback.format_exc()}"
                 )
             # clean up open collection if possible
             try:
@@ -498,8 +504,9 @@ class AnkiQt(QMainWindow):
         # make sure we don't get into an inconsistent state if an add-on
         # has broken the deck browser or the did_load hook
         try:
-            self.maybeEnableUndo()
+            self.update_undo_actions()
             gui_hooks.collection_did_load(self.col)
+            self.apply_collection_options()
             self.moveToState("deckBrowser")
         except Exception as e:
             # dump error to stderr so it gets picked up by errors.py
@@ -507,23 +514,23 @@ class AnkiQt(QMainWindow):
 
         return True
 
-    def _loadCollection(self):
+    def _loadCollection(self) -> None:
         cpath = self.pm.collectionPath()
         self.col = Collection(cpath, backend=self.backend, log=True)
         self.setEnabled(True)
 
-    def reopen(self):
+    def reopen(self) -> None:
         self.col.reopen()
 
     def unloadCollection(self, onsuccess: Callable) -> None:
-        def after_media_sync():
+        def after_media_sync() -> None:
             self._unloadCollection()
             onsuccess()
 
-        def after_sync():
+        def after_sync() -> None:
             self.media_syncer.show_diag_until_finished(after_media_sync)
 
-        def before_sync():
+        def before_sync() -> None:
             self.setEnabled(False)
             self.maybe_auto_sync_on_open_close(after_sync)
 
@@ -557,11 +564,24 @@ class AnkiQt(QMainWindow):
         if not corrupt and not self.restoringBackup:
             self.backup()
 
+    def _close_for_full_download(self) -> None:
+        "Backup and prepare collection to be overwritten."
+        self.col.close(downgrade=False)
+        self.backup()
+        self.col.reopen(after_full_sync=False)
+        self.col.close_for_full_sync()
+
+    def apply_collection_options(self) -> None:
+        "Setup audio after collection loaded."
+        aqt.sound.av_player.interrupt_current_audio = self.col.get_config_bool(
+            Config.Bool.INTERRUPT_AUDIO_WHEN_ANSWERING
+        )
+
     # Backup and auto-optimize
     ##########################################################################
 
     class BackupThread(Thread):
-        def __init__(self, path, data):
+        def __init__(self, path: str, data: bytes) -> None:
             Thread.__init__(self)
             self.path = path
             self.data = data
@@ -570,13 +590,16 @@ class AnkiQt(QMainWindow):
             with open(self.path, "wb") as file:
                 pass
 
-        def run(self):
+        def run(self) -> None:
             z = zipfile.ZipFile(self.path, "w", zipfile.ZIP_DEFLATED)
             z.writestr("collection.anki2", self.data)
             z.writestr("media", "{}")
             z.close()
 
     def backup(self) -> None:
+        "Read data into memory, and complete backup on a background thread."
+        assert not self.col or not self.col.db
+
         nbacks = self.pm.profile["numBackups"]
         if not nbacks or devMode:
             return
@@ -607,7 +630,8 @@ class AnkiQt(QMainWindow):
             fname = backups.pop(0)
             path = os.path.join(dir, fname)
             os.unlink(path)
-        gui_hooks.backup_did_complete()
+
+        self.taskman.run_on_main(gui_hooks.backup_did_complete)
 
     def maybeOptimize(self) -> None:
         # have two weeks passed?
@@ -622,17 +646,17 @@ class AnkiQt(QMainWindow):
     # State machine
     ##########################################################################
 
-    def moveToState(self, state: str, *args) -> None:
+    def moveToState(self, state: str, *args: Any) -> None:
         # print("-> move from", self.state, "to", state)
         oldState = self.state or "dummy"
-        cleanup = getattr(self, "_" + oldState + "Cleanup", None)
+        cleanup = getattr(self, f"_{oldState}Cleanup", None)
         if cleanup:
             # pylint: disable=not-callable
             cleanup(state)
         self.clearStateShortcuts()
         self.state = state
         gui_hooks.state_will_change(state, oldState)
-        getattr(self, "_" + state + "State")(oldState, *args)
+        getattr(self, f"_{state}State")(oldState, *args)
         if state != "resetRequired":
             self.bottomWeb.show()
         gui_hooks.state_did_change(state, oldState)
@@ -643,7 +667,7 @@ class AnkiQt(QMainWindow):
 
     def _selectedDeck(self) -> Optional[Deck]:
         did = self.col.decks.selected()
-        if not self.col.decks.nameOrNone(did):
+        if not self.col.decks.name_if_exists(did):
             showInfo(tr(TR.QT_MISC_PLEASE_SELECT_A_DECK))
             return None
         return self.col.decks.get(did)
@@ -653,10 +677,10 @@ class AnkiQt(QMainWindow):
             return self.moveToState("deckBrowser")
         self.overview.show()
 
-    def _reviewState(self, oldState):
+    def _reviewState(self, oldState: str) -> None:
         self.reviewer.show()
 
-    def _reviewCleanup(self, newState):
+    def _reviewCleanup(self, newState: str) -> None:
         if newState != "resetRequired" and newState != "review":
             self.reviewer.cleanup()
 
@@ -669,10 +693,15 @@ class AnkiQt(QMainWindow):
             if not guiOnly:
                 self.col.reset()
             gui_hooks.state_did_reset()
-            self.maybeEnableUndo()
+            self.update_undo_actions()
             self.moveToState(self.state)
 
-    def requireReset(self, modal=False, reason="unknown", context=None):
+    def requireReset(
+        self,
+        modal: bool = False,
+        reason: ResetReason = ResetReason.Unknown,
+        context: Any = None,
+    ) -> None:
         "Signal queue needs to be rebuilt when edits are finished or by user."
         self.autosave()
         self.resetModal = modal
@@ -681,7 +710,7 @@ class AnkiQt(QMainWindow):
         ):
             self.moveToState("resetRequired")
 
-    def interactiveState(self):
+    def interactiveState(self) -> bool:
         "True if not in profile manager, syncing, etc."
         return self.state in ("overview", "review", "deckBrowser")
 
@@ -691,7 +720,7 @@ class AnkiQt(QMainWindow):
             self.state = self.returnState
             self.reset()
 
-    def delayedMaybeReset(self):
+    def delayedMaybeReset(self) -> None:
         # if we redraw the page in a button click event it will often crash on
         # windows
         self.progress.timer(100, self.maybeReset, False)
@@ -707,14 +736,13 @@ class AnkiQt(QMainWindow):
         i = tr(TR.QT_MISC_WAITING_FOR_EDITING_TO_FINISH)
         b = self.button("refresh", tr(TR.QT_MISC_RESUME_NOW), id="resume")
         self.web.stdHtml(
-            """
-<center><div style="height: 100%%">
+            f"""
+<center><div style="height: 100%">
 <div style="position:relative; vertical-align: middle;">
-%s<br><br>
-%s</div></div></center>
+{i}<br><br>
+{b}</div></div></center>
 <script>$('#resume').focus()</script>
-"""
-            % (i, b),
+""",
             context=web_context,
         )
         self.bottomWeb.hide()
@@ -732,7 +760,7 @@ class AnkiQt(QMainWindow):
         id: str = "",
         extra: str = "",
     ) -> str:
-        class_ = "but " + class_
+        class_ = f"but {class_}"
         if key:
             key = tr(TR.ACTIONS_SHORTCUT_KEY, val=key)
         else:
@@ -792,9 +820,9 @@ title="%s" %s>%s</button>""" % (
         signal.signal(signal.SIGINT, self.onUnixSignal)
         signal.signal(signal.SIGTERM, self.onUnixSignal)
 
-    def onUnixSignal(self, signum, frame):
+    def onUnixSignal(self, signum: Any, frame: Any) -> None:
         # schedule a rollback & quit
-        def quit():
+        def quit() -> None:
             self.col.db.rollback()
             self.close()
 
@@ -820,13 +848,16 @@ title="%s" %s>%s</button>""" % (
             self.addonManager.loadAddons()
             self.maybe_check_for_addon_updates()
 
-    def maybe_check_for_addon_updates(self):
+    def maybe_check_for_addon_updates(self) -> None:
         last_check = self.pm.last_addon_update_check()
         elap = intTime() - last_check
 
         if elap > 86_400:
             check_and_prompt_for_updates(
-                self, self.addonManager, self.on_updates_installed
+                self,
+                self.addonManager,
+                self.on_updates_installed,
+                requested_by_user=False,
             )
             self.pm.set_last_addon_update_check(intTime())
 
@@ -863,7 +894,7 @@ title="%s" %s>%s</button>""" % (
     # Syncing
     ##########################################################################
 
-    def on_sync_button_clicked(self):
+    def on_sync_button_clicked(self) -> None:
         if self.media_syncer.is_syncing():
             self.media_syncer.show_sync_log()
         else:
@@ -876,17 +907,17 @@ title="%s" %s>%s</button>""" % (
             else:
                 self._sync_collection_and_media(self._refresh_after_sync)
 
-    def _refresh_after_sync(self):
+    def _refresh_after_sync(self) -> None:
         self.toolbar.redraw()
 
-    def _sync_collection_and_media(self, after_sync: Callable[[], None]):
+    def _sync_collection_and_media(self, after_sync: Callable[[], None]) -> None:
         "Caller should ensure auth available."
         # start media sync if not already running
         if not self.media_syncer.is_syncing():
             self.media_syncer.start()
 
-        def on_collection_sync_finished():
-            self.col.clearUndo()
+        def on_collection_sync_finished() -> None:
+            self.col.clear_python_undo()
             self.col.models._clear_cache()
             gui_hooks.sync_did_finish()
             self.reset()
@@ -918,7 +949,7 @@ title="%s" %s>%s</button>""" % (
         )
 
     # legacy
-    def _sync(self):
+    def _sync(self) -> None:
         pass
 
     onSync = on_sync_button_clicked
@@ -966,7 +997,7 @@ title="%s" %s>%s</button>""" % (
     def setStateShortcuts(self, shortcuts: List[Tuple[str, Callable]]) -> None:
         gui_hooks.state_shortcuts_will_change(self.state, shortcuts)
         # legacy hook
-        runHook(self.state + "StateShortcuts", shortcuts)
+        runHook(f"{self.state}StateShortcuts", shortcuts)
         self.stateShortcuts = self.applyShortcuts(shortcuts)
 
     def clearStateShortcuts(self) -> None:
@@ -999,41 +1030,81 @@ title="%s" %s>%s</button>""" % (
     ##########################################################################
 
     def onUndo(self) -> None:
-        n = self.col.undoName()
-        if not n:
-            return
-        cid = self.col.undo()
-        if cid and self.state == "review":
-            card = self.col.getCard(cid)
-            self.col.sched.reset()
-            self.reviewer.cardQueue.append(card)
-            self.reviewer.nextCard()
-            gui_hooks.review_did_undo(cid)
-        else:
-            self.reset()
-            tooltip(tr(TR.QT_MISC_REVERTED_TO_STATE_PRIOR_TO, val=n.lower()))
-            gui_hooks.state_did_revert(n)
-        self.maybeEnableUndo()
+        reviewing = self.state == "review"
+        result = self.col.undo()
+        just_refresh_reviewer = False
 
-    def maybeEnableUndo(self) -> None:
-        if self.col and self.col.undoName():
-            self.form.actionUndo.setText(tr(TR.QT_MISC_UNDO2, val=self.col.undoName()))
+        if result is None:
+            # should not happen
+            showInfo("nothing to undo")
+            self.update_undo_actions()
+            return
+
+        elif isinstance(result, ReviewUndo):
+            name = tr(TR.SCHEDULING_REVIEW)
+
+            if reviewing:
+                # push the undone card to the top of the queue
+                cid = result.card.id
+                card = self.col.getCard(cid)
+                self.reviewer.cardQueue.append(card)
+
+                gui_hooks.review_did_undo(cid)
+
+                just_refresh_reviewer = True
+
+        elif isinstance(result, BackendUndo):
+            name = result.name
+
+            if reviewing and self.col.sched.is_2021:
+                # new scheduler will have taken care of updating queue
+                just_refresh_reviewer = True
+
+        elif isinstance(result, Checkpoint):
+            name = result.name
+
+        else:
+            assert_exhaustive(result)
+            assert False
+
+        if just_refresh_reviewer:
+            self.reviewer.nextCard()
+        else:
+            # full queue+gui reset required
+            self.reset()
+
+        tooltip(tr(TR.UNDO_ACTION_UNDONE, action=name))
+        gui_hooks.state_did_revert(name)
+        self.update_undo_actions()
+
+    def update_undo_actions(self) -> None:
+        """Update menu text and enable/disable menu item as appropriate.
+        Plural as this may handle redo in the future too."""
+        if self.col:
+            status = self.col.undo_status()
+            undo_action = status.undo or None
+        else:
+            undo_action = None
+
+        if undo_action:
+            undo_action = tr(TR.UNDO_UNDO_ACTION, val=undo_action)
+            self.form.actionUndo.setText(undo_action)
             self.form.actionUndo.setEnabled(True)
             gui_hooks.undo_state_did_change(True)
         else:
-            self.form.actionUndo.setText(tr(TR.QT_MISC_UNDO))
+            self.form.actionUndo.setText(tr(TR.UNDO_UNDO))
             self.form.actionUndo.setEnabled(False)
             gui_hooks.undo_state_did_change(False)
 
-    def checkpoint(self, name):
+    def checkpoint(self, name: str) -> None:
         self.col.save(name)
-        self.maybeEnableUndo()
+        self.update_undo_actions()
 
     def autosave(self) -> None:
-        saved = self.col.autosave()
-        self.maybeEnableUndo()
-        if saved:
-            self.doGC()
+        self.col.autosave()
+        self.update_undo_actions()
+
+    maybeEnableUndo = update_undo_actions
 
     # Other menu operations
     ##########################################################################
@@ -1042,28 +1113,26 @@ title="%s" %s>%s</button>""" % (
         aqt.dialogs.open("AddCards", self)
 
     def onBrowse(self) -> None:
-        aqt.dialogs.open("Browser", self)
+        aqt.dialogs.open("Browser", self, card=self.reviewer.card)
 
-    def onEditCurrent(self):
+    def onEditCurrent(self) -> None:
         aqt.dialogs.open("EditCurrent", self)
 
-    def onDeckConf(self, deck=None):
+    def onDeckConf(self, deck: Optional[Deck] = None) -> None:
+        import aqt.deckconf
+
         if not deck:
             deck = self.col.decks.current()
         if deck["dyn"]:
-            import aqt.dyndeckconf
-
-            aqt.dyndeckconf.DeckConf(self, deck=deck)
+            aqt.dialogs.open("DynDeckConfDialog", self, deck=deck)
         else:
-            import aqt.deckconf
-
             aqt.deckconf.DeckConf(self, deck)
 
-    def onOverview(self):
+    def onOverview(self) -> None:
         self.col.reset()
         self.moveToState("overview")
 
-    def onStats(self):
+    def onStats(self) -> None:
         deck = self._selectedDeck()
         if not deck:
             return
@@ -1073,22 +1142,22 @@ title="%s" %s>%s</button>""" % (
         else:
             aqt.dialogs.open("NewDeckStats", self)
 
-    def onPrefs(self):
+    def onPrefs(self) -> None:
         aqt.dialogs.open("Preferences", self)
 
-    def onNoteTypes(self):
+    def onNoteTypes(self) -> None:
         import aqt.models
 
         aqt.models.Models(self, self, fromMain=True)
 
-    def onAbout(self):
+    def onAbout(self) -> None:
         aqt.dialogs.open("About", self)
 
-    def onDonate(self):
+    def onDonate(self) -> None:
         openLink(aqt.appDonate)
 
-    def onDocumentation(self):
-        openHelp("")
+    def onDocumentation(self) -> None:
+        openHelp(HelpPage.INDEX)
 
     # Importing & exporting
     ##########################################################################
@@ -1103,12 +1172,12 @@ title="%s" %s>%s</button>""" % (
         aqt.importing.importFile(self, path)
         return None
 
-    def onImport(self):
+    def onImport(self) -> None:
         import aqt.importing
 
         aqt.importing.onImport(self)
 
-    def onExport(self, did=None):
+    def onExport(self, did: Optional[int] = None) -> None:
         import aqt.exporting
 
         aqt.exporting.ExportDialog(self, did=did)
@@ -1116,7 +1185,7 @@ title="%s" %s>%s</button>""" % (
     # Installing add-ons from CLI / mimetype handler
     ##########################################################################
 
-    def installAddon(self, path: str, startup: bool = False):
+    def installAddon(self, path: str, startup: bool = False) -> None:
         from aqt.addons import installAddonPackages
 
         installAddonPackages(
@@ -1131,25 +1200,8 @@ title="%s" %s>%s</button>""" % (
     # Cramming
     ##########################################################################
 
-    def onCram(self, search=""):
-        import aqt.dyndeckconf
-
-        n = 1
-        deck = self.col.decks.current()
-        if not search:
-            if not deck["dyn"]:
-                search = 'deck:"%s" ' % deck["name"]
-        while self.col.decks.id_for_name(
-            without_unicode_isolation(tr(TR.QT_MISC_FILTERED_DECK, val=n))
-        ):
-            n += 1
-        name = without_unicode_isolation(tr(TR.QT_MISC_FILTERED_DECK, val=n))
-        did = self.col.decks.new_filtered(name)
-        diag = aqt.dyndeckconf.DeckConf(self, first=True, search=search)
-        if not diag.ok:
-            # user cancelled first config
-            self.col.decks.rem(did)
-            self.col.decks.select(deck["id"])
+    def onCram(self) -> None:
+        aqt.dialogs.open("DynDeckConfDialog", self)
 
     # Menu, title bar & status
     ##########################################################################
@@ -1191,14 +1243,14 @@ title="%s" %s>%s</button>""" % (
         qconnect(self.autoUpdate.clockIsOff, self.clockIsOff)
         self.autoUpdate.start()
 
-    def newVerAvail(self, ver):
+    def newVerAvail(self, ver: str) -> None:
         if self.pm.meta.get("suppressUpdate", None) != ver:
             aqt.update.askAndUpdate(self, ver)
 
-    def newMsg(self, data):
+    def newMsg(self, data: Dict) -> None:
         aqt.update.showMessages(self, data)
 
-    def clockIsOff(self, diff):
+    def clockIsOff(self, diff: int) -> None:
         if devMode:
             print("clock is off; ignoring")
             return
@@ -1215,17 +1267,19 @@ title="%s" %s>%s</button>""" % (
         self.progress.timer(10 * 60 * 1000, self.onRefreshTimer, True)
         # check media sync every 5 minutes
         self.progress.timer(5 * 60 * 1000, self.on_autosync_timer, True)
+        # periodic garbage collection
+        self.progress.timer(15 * 60 * 1000, self.garbage_collect_now, False)
         # ensure Python interpreter runs at least once per second, so that
         # SIGINT/SIGTERM is processed without a long delay
         self.progress.timer(1000, lambda: None, True, False)
 
-    def onRefreshTimer(self):
+    def onRefreshTimer(self) -> None:
         if self.state == "deckBrowser":
             self.deckBrowser.refresh()
         elif self.state == "overview":
             self.overview.refresh()
 
-    def on_autosync_timer(self):
+    def on_autosync_timer(self) -> None:
         elap = self.media_syncer.seconds_since_last_sync()
         minutes = self.pm.auto_sync_media_minutes()
         if not minutes:
@@ -1246,7 +1300,7 @@ title="%s" %s>%s</button>""" % (
 
         self._activeWindowOnPlay: Optional[QWidget] = None
 
-    def onOdueInvalid(self):
+    def onOdueInvalid(self) -> None:
         showWarning(tr(TR.QT_MISC_INVALID_PROPERTY_FOUND_ON_CARD_PLEASE))
 
     def _isVideo(self, tag: AVTag) -> bool:
@@ -1281,7 +1335,7 @@ title="%s" %s>%s</button>""" % (
             if not existed:
                 f.write(b"nid\tmid\tfields\n")
             for id, mid, flds in col.db.execute(
-                "select id, mid, flds from notes where id in %s" % ids2str(nids)
+                f"select id, mid, flds from notes where id in {ids2str(nids)}"
             ):
                 fields = splitFields(flds)
                 f.write(("\t".join([str(id), str(mid)] + fields)).encode("utf8"))
@@ -1291,7 +1345,7 @@ title="%s" %s>%s</button>""" % (
     ##########################################################################
 
     # this will gradually be phased out
-    def onSchemaMod(self, arg):
+    def onSchemaMod(self, arg: bool) -> bool:
         assert self.inMainThread()
         progress_shown = self.progress.busy()
         if progress_shown:
@@ -1312,14 +1366,14 @@ title="%s" %s>%s</button>""" % (
     # Advanced features
     ##########################################################################
 
-    def onCheckDB(self):
+    def onCheckDB(self) -> None:
         check_db(self)
 
     def on_check_media_db(self) -> None:
         gui_hooks.media_check_will_start()
         check_media_db(self)
 
-    def onStudyDeck(self):
+    def onStudyDeck(self) -> None:
         from aqt.studydeck import StudyDeck
 
         ret = StudyDeck(self, dyn=True, current=self.col.decks.current()["name"])
@@ -1333,17 +1387,18 @@ title="%s" %s>%s</button>""" % (
     # Debugging
     ######################################################################
 
-    def onDebug(self):
+    def onDebug(self) -> None:
         frm = self.debug_diag_form = aqt.forms.debug.Ui_Dialog()
 
         class DebugDialog(QDialog):
-            def reject(self):
+            def reject(self) -> None:
                 super().reject()
                 saveSplitter(frm.splitter, "DebugConsoleWindow")
                 saveGeom(self, "DebugConsoleWindow")
 
         d = self.debugDiag = DebugDialog()
         d.silentlyClose = True
+        disable_help_button(d)
         frm.setupUi(d)
         restoreGeom(d, "DebugConsoleWindow")
         restoreSplitter(frm.splitter, "DebugConsoleWindow")
@@ -1372,7 +1427,7 @@ title="%s" %s>%s</button>""" % (
                 a = menu.addAction("Clear Code")
                 a.setShortcuts(QKeySequence("ctrl+shift+l"))
                 qconnect(a.triggered, frm.text.clear)
-            menu.exec(QCursor.pos())
+            menu.exec_(QCursor.pos())
 
         frm.log.contextMenuEvent = lambda ev: addContextMenu(ev, "log")
         frm.text.contextMenuEvent = lambda ev: addContextMenu(ev, "text")
@@ -1380,11 +1435,11 @@ title="%s" %s>%s</button>""" % (
         d.show()
 
     def _captureOutput(self, on: bool) -> None:
-        mw = self
+        mw2 = self
 
         class Stream:
-            def write(self, data):
-                mw._output += data
+            def write(self, data: str) -> None:
+                mw2._output += data
 
         if on:
             self._output = ""
@@ -1434,20 +1489,20 @@ title="%s" %s>%s</button>""" % (
         self._card_repr(card)
         return card
 
-    def onDebugPrint(self, frm):
+    def onDebugPrint(self, frm: aqt.forms.debug.Ui_Dialog) -> None:
         cursor = frm.text.textCursor()
         position = cursor.position()
         cursor.select(QTextCursor.LineUnderCursor)
         line = cursor.selectedText()
         pfx, sfx = "pp(", ")"
         if not line.startswith(pfx):
-            line = "{}{}{}".format(pfx, line, sfx)
+            line = f"{pfx}{line}{sfx}"
             cursor.insertText(line)
             cursor.setPosition(position + len(pfx))
             frm.text.setTextCursor(cursor)
         self.onDebugRet(frm)
 
-    def onDebugRet(self, frm):
+    def onDebugRet(self, frm: aqt.forms.debug.Ui_Dialog) -> None:
         import pprint
         import traceback
 
@@ -1466,9 +1521,9 @@ title="%s" %s>%s</button>""" % (
         buf = ""
         for c, line in enumerate(text.strip().split("\n")):
             if c == 0:
-                buf += ">>> %s\n" % line
+                buf += f">>> {line}\n"
             else:
-                buf += "... %s\n" % line
+                buf += f"... {line}\n"
         try:
             to_append = buf + (self._output or "<no output>")
             to_append = gui_hooks.debug_console_did_evaluate_python(
@@ -1525,14 +1580,15 @@ title="%s" %s>%s</button>""" % (
     def setupAppMsg(self) -> None:
         qconnect(self.app.appMsg, self.onAppMsg)
 
-    def onAppMsg(self, buf: str) -> Optional[QTimer]:
+    def onAppMsg(self, buf: str) -> None:
         is_addon = self._isAddon(buf)
 
         if self.state == "startup":
             # try again in a second
-            return self.progress.timer(
+            self.progress.timer(
                 1000, lambda: self.onAppMsg(buf), False, requiresCollection=False
             )
+            return
         elif self.state == "profileManager":
             # can't raise window while in profile manager
             if buf == "raise":
@@ -1542,7 +1598,8 @@ title="%s" %s>%s</button>""" % (
                 msg = tr(TR.QT_MISC_ADDON_WILL_BE_INSTALLED_WHEN_A)
             else:
                 msg = tr(TR.QT_MISC_DECK_WILL_BE_IMPORTED_WHEN_A)
-            return tooltip(msg)
+            tooltip(msg)
+            return
         if not self.interactiveState() or self.progress.busy():
             # we can't raise the main window while in profile dialog, syncing, etc
             if buf != "raise":
@@ -1577,21 +1634,38 @@ title="%s" %s>%s</button>""" % (
 
     # GC
     ##########################################################################
-    # ensure gc runs in main thread
+    # The default Python garbage collection can trigger on any thread. This can
+    # cause crashes if Qt objects are garbage-collected, as Qt expects access
+    # only on the main thread. So Anki disables the default GC on startup, and
+    # instead runs it on a timer, and after dialog close.
+    # The gc after dialog close is necessary to free up the memory and extra
+    # processes that webviews spawn, as a lot of the GUI code creates ref cycles.
 
-    def setupDialogGC(self, obj: Any) -> None:
-        qconnect(obj.finished, lambda: self.gcWindow(obj))
+    def garbage_collect_on_dialog_finish(self, dialog: QDialog) -> None:
+        qconnect(
+            dialog.finished, lambda: self.deferred_delete_and_garbage_collect(dialog)
+        )
 
-    def gcWindow(self, obj: Any) -> None:
+    def deferred_delete_and_garbage_collect(self, obj: QObject) -> None:
         obj.deleteLater()
-        self.progress.timer(1000, self.doGC, False, requiresCollection=False)
+        self.progress.timer(
+            1000, self.garbage_collect_now, False, requiresCollection=False
+        )
 
-    def disableGC(self) -> None:
+    def disable_automatic_garbage_collection(self) -> None:
         gc.collect()
         gc.disable()
 
-    def doGC(self) -> None:
+    def garbage_collect_now(self) -> None:
+        # gc.collect() has optional arguments that will cause problems if
+        # it's passed directly to a QTimer, and pylint complains if we
+        # wrap it in a lambda, so we use this trivial wrapper
         gc.collect()
+
+    # legacy aliases
+
+    setupDialogGC = garbage_collect_on_dialog_finish
+    gcWindow = deferred_delete_and_garbage_collect
 
     # Crash log
     ##########################################################################
@@ -1609,7 +1683,7 @@ title="%s" %s>%s</button>""" % (
         self.mediaServer.start()
 
     def baseHTML(self) -> str:
-        return '<base href="%s">' % self.serverURL()
+        return f'<base href="{self.serverURL()}">'
 
     def serverURL(self) -> str:
         return "http://127.0.0.1:%d/" % self.mediaServer.getPort()

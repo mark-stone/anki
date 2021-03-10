@@ -1,4 +1,3 @@
-preferences-anki-21-scheduler-beta = Anki 2.1 scheduler (beta)
 preferences-automatically-sync-on-profile-openclose = Automatically sync on profile open/close
 preferences-backups = Backups
 preferences-backups2 = backups
@@ -6,7 +5,6 @@ preferences-backupsanki-will-create-a-backup-of = <html><head/><body><p><span st
 preferences-basic = Basic
 preferences-change-deck-depending-on-note-type = Change deck depending on note type
 preferences-changes-will-take-effect-when-you = Changes will take effect when you restart Anki.
-preferences-hardware-acceleration-faster-may-cause-display = Hardware acceleration (faster, may cause display issues)
 preferences-hours-past-midnight = hours past midnight
 preferences-interface-language = Interface language:
 preferences-interrupt-current-audio-when-answering = Interrupt current audio when answering
@@ -37,3 +35,4 @@ preferences-timebox-time-limit = Timebox time limit
 preferences-user-interface-size = User interface size
 preferences-when-adding-default-to-current-deck = When adding, default to current deck
 preferences-you-can-restore-backups-via-fileswitch = You can restore backups via File>Switch Profile.
+preferences-legacy-timezone-handling = Legacy timezone handling (buggy, but required for AnkiDroid <= 2.14)

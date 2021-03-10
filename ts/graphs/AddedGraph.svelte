@@ -1,6 +1,6 @@
 <script lang="typescript">
     import { RevlogRange, GraphRange } from "./graph-helpers";
-    import type { TableDatum } from "./graph-helpers";
+    import type { TableDatum, SearchEventMap } from "./graph-helpers";
     import type { I18n } from "anki/i18n";
     import type { HistogramData } from "./histogram-graph";
     import { gatherData, buildHistogram } from "./added";
@@ -9,13 +9,19 @@
     import HistogramGraph from "./HistogramGraph.svelte";
     import GraphRangeRadios from "./GraphRangeRadios.svelte";
     import TableData from "./TableData.svelte";
+    import { createEventDispatcher } from "svelte";
+    import type { PreferenceStore } from "./preferences";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
     export let i18n: I18n;
+    export let preferences: PreferenceStore;
 
     let histogramData = null as HistogramData | null;
     let tableData: TableDatum[] = [];
     let graphRange: GraphRange = GraphRange.Month;
+    let { browserLinksSupported } = preferences;
+
+    const dispatch = createEventDispatcher<SearchEventMap>();
 
     let addedData: GraphData | null = null;
     $: if (sourceData) {
@@ -23,7 +29,13 @@
     }
 
     $: if (addedData) {
-        [histogramData, tableData] = buildHistogram(addedData, graphRange, i18n);
+        [histogramData, tableData] = buildHistogram(
+            addedData,
+            graphRange,
+            i18n,
+            dispatch,
+            $browserLinksSupported
+        );
     }
 
     const title = i18n.tr(i18n.TR.STATISTICS_ADDED_TITLE);

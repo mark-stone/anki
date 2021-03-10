@@ -13,7 +13,15 @@ import aqt
 from anki import hooks
 from anki.exporting import Exporter, exporters
 from aqt.qt import *
-from aqt.utils import TR, checkInvalidFilename, getSaveFile, showWarning, tooltip, tr
+from aqt.utils import (
+    TR,
+    checkInvalidFilename,
+    disable_help_button,
+    getSaveFile,
+    showWarning,
+    tooltip,
+    tr,
+)
 
 
 class ExportDialog(QDialog):
@@ -30,10 +38,11 @@ class ExportDialog(QDialog):
         self.frm.setupUi(self)
         self.exporter: Optional[Exporter] = None
         self.cids = cids
+        disable_help_button(self)
         self.setup(did)
         self.exec_()
 
-    def setup(self, did: Optional[int]):
+    def setup(self, did: Optional[int]) -> None:
         self.exporters = exporters(self.col)
         # if a deck specified, start with .apkg type selected
         idx = 0
@@ -62,7 +71,7 @@ class ExportDialog(QDialog):
             index = self.frm.deck.findText(name)
             self.frm.deck.setCurrentIndex(index)
 
-    def exporterChanged(self, idx):
+    def exporterChanged(self, idx: int) -> None:
         self.exporter = self.exporters[idx][1](self.col)
         self.isApkg = self.exporter.ext == ".apkg"
         self.isVerbatim = getattr(self.exporter, "verbatim", False)
@@ -85,7 +94,7 @@ class ExportDialog(QDialog):
         # show deck list?
         self.frm.deck.setVisible(not self.isVerbatim)
 
-    def accept(self):
+    def accept(self) -> None:
         self.exporter.includeSched = self.frm.includeSched.isChecked()
         self.exporter.includeMedia = self.frm.includeMedia.isChecked()
         self.exporter.includeTags = self.frm.includeTags.isChecked()
@@ -112,7 +121,7 @@ class ExportDialog(QDialog):
             deck_name = self.decks[self.frm.deck.currentIndex()]
             deck_name = re.sub('[\\\\/?<>:*|"^]', "_", deck_name)
 
-        filename = "{0}{1}".format(deck_name, self.exporter.ext)
+        filename = f"{deck_name}{self.exporter.ext}"
         if callable(self.exporter.key):
             key_str = self.exporter.key(self.col)
         else:
@@ -140,23 +149,23 @@ class ExportDialog(QDialog):
             try:
                 f = open(file, "wb")
                 f.close()
-            except (OSError, IOError) as e:
+            except OSError as e:
                 showWarning(tr(TR.EXPORTING_COULDNT_SAVE_FILE, val=str(e)))
             else:
                 os.unlink(file)
 
             # progress handler
-            def exported_media(cnt):
+            def exported_media(cnt: int) -> None:
                 self.mw.taskman.run_on_main(
                     lambda: self.mw.progress.update(
                         label=tr(TR.EXPORTING_EXPORTED_MEDIA_FILE, count=cnt)
                     )
                 )
 
-            def do_export():
+            def do_export() -> None:
                 self.exporter.exportInto(file)
 
-            def on_done(future: Future):
+            def on_done(future: Future) -> None:
                 self.mw.progress.finish()
                 hooks.media_files_did_export.remove(exported_media)
                 # raises if exporter failed
@@ -168,7 +177,7 @@ class ExportDialog(QDialog):
 
             self.mw.taskman.run_in_background(do_export, on_done)
 
-    def on_export_finished(self):
+    def on_export_finished(self) -> None:
         if self.isVerbatim:
             msg = tr(TR.EXPORTING_COLLECTION_EXPORTED)
             self.mw.reopen()

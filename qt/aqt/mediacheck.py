@@ -9,9 +9,20 @@ from concurrent.futures import Future
 from typing import Iterable, List, Optional, Sequence, TypeVar
 
 import aqt
-from anki.rsbackend import TR, Interrupted, ProgressKind, pb
+from anki.collection import SearchNode
+from anki.errors import Interrupted
+from anki.lang import TR
+from anki.media import CheckMediaOut
 from aqt.qt import *
-from aqt.utils import askUser, restoreGeom, saveGeom, showText, tooltip, tr
+from aqt.utils import (
+    askUser,
+    disable_help_button,
+    restoreGeom,
+    saveGeom,
+    showText,
+    tooltip,
+    tr,
+)
 
 T = TypeVar("T")
 
@@ -47,25 +58,30 @@ class MediaChecker:
             self._progress_timer.stop()
             self._progress_timer = None
         if enabled:
-            self._progress_timer = self.mw.progress.timer(100, self._on_progress, True)
+            self._progress_timer = timer = QTimer()
+            timer.setSingleShot(False)
+            timer.setInterval(100)
+            qconnect(timer.timeout, self._on_progress)
+            timer.start()
 
     def _on_progress(self) -> None:
-        progress = self.mw.col.latest_progress()
-        if progress.kind != ProgressKind.MediaCheck:
+        if not self.mw.col:
             return
-
-        assert isinstance(progress.val, str)
+        progress = self.mw.col.latest_progress()
+        if not progress.HasField("media_check"):
+            return
+        label = progress.media_check
 
         try:
             if self.progress_dialog.wantCancel:
-                self.mw.col.backend.set_wants_abort()
+                self.mw.col.set_wants_abort()
         except AttributeError:
             # dialog may not be active
             pass
 
-        self.mw.taskman.run_on_main(lambda: self.mw.progress.update(progress.val))
+        self.mw.taskman.run_on_main(lambda: self.mw.progress.update(label=label))
 
-    def _check(self) -> pb.CheckMediaOut:
+    def _check(self) -> CheckMediaOut:
         "Run the check on a background thread."
         return self.mw.col.media.check()
 
@@ -78,17 +94,19 @@ class MediaChecker:
         if isinstance(exc, Interrupted):
             return
 
-        output: pb.CheckMediaOut = future.result()
+        output: CheckMediaOut = future.result()
         report = output.report
 
         # show report and offer to delete
         diag = QDialog(self.mw)
         diag.setWindowTitle(tr(TR.MEDIA_CHECK_WINDOW_TITLE))
+        disable_help_button(diag)
         layout = QVBoxLayout(diag)
         diag.setLayout(layout)
-        text = QTextEdit()
+        text = QPlainTextEdit()
         text.setReadOnly(True)
         text.setPlainText(report)
+        text.setWordWrapMode(QTextOption.NoWrap)
         layout.addWidget(text)
         box = QDialogButtonBox(QDialogButtonBox.Close)
         layout.addWidget(box)
@@ -124,7 +142,7 @@ class MediaChecker:
         diag.exec_()
         saveGeom(diag, "checkmediadb")
 
-    def _on_render_latex(self):
+    def _on_render_latex(self) -> None:
         self.progress_dialog = self.mw.progress.start()
         try:
             out = self.mw.col.media.render_all_latex(self._on_render_latex_progress)
@@ -136,9 +154,7 @@ class MediaChecker:
 
         if out is not None:
             nid, err = out
-            browser = aqt.dialogs.open("Browser", self.mw)
-            browser.form.searchEdit.lineEdit().setText("nid:%d" % nid)
-            browser.onSearchActivated()
+            aqt.dialogs.open("Browser", self.mw, search=(SearchNode(nid=nid),))
             showText(err, type="html")
         else:
             tooltip(tr(TR.MEDIA_CHECK_ALL_LATEX_RENDERED))
@@ -150,7 +166,7 @@ class MediaChecker:
         self.mw.progress.update(tr(TR.MEDIA_CHECK_CHECKED, count=count))
         return True
 
-    def _on_trash_files(self, fnames: Sequence[str]):
+    def _on_trash_files(self, fnames: Sequence[str]) -> None:
         if not askUser(tr(TR.MEDIA_CHECK_DELETE_UNUSED_CONFIRM)):
             return
 
@@ -173,14 +189,14 @@ class MediaChecker:
 
         tooltip(tr(TR.MEDIA_CHECK_DELETE_UNUSED_COMPLETE, count=total))
 
-    def _on_empty_trash(self):
+    def _on_empty_trash(self) -> None:
         self.progress_dialog = self.mw.progress.start()
         self._set_progress_enabled(True)
 
-        def empty_trash():
-            self.mw.col.backend.empty_trash()
+        def empty_trash() -> None:
+            self.mw.col.media.empty_trash()
 
-        def on_done(fut: Future):
+        def on_done(fut: Future) -> None:
             self.mw.progress.finish()
             self._set_progress_enabled(False)
             # check for errors
@@ -190,14 +206,14 @@ class MediaChecker:
 
         self.mw.taskman.run_in_background(empty_trash, on_done)
 
-    def _on_restore_trash(self):
+    def _on_restore_trash(self) -> None:
         self.progress_dialog = self.mw.progress.start()
         self._set_progress_enabled(True)
 
-        def restore_trash():
-            self.mw.col.backend.restore_trash()
+        def restore_trash() -> None:
+            self.mw.col.media.restore_trash()
 
-        def on_done(fut: Future):
+        def on_done(fut: Future) -> None:
             self.mw.progress.finish()
             self._set_progress_enabled(False)
             # check for errors

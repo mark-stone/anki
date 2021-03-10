@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional, Set
 
 from anki.hooks import *
-from anki.utils import ids2str, splitFields, stripHTMLMedia
 
 if TYPE_CHECKING:
     from anki.collection import Collection
@@ -17,10 +16,10 @@ class Finder:
         self.col = col.weakref()
         print("Finder() is deprecated, please use col.find_cards() or .find_notes()")
 
-    def findCards(self, query, order):
+    def findCards(self, query: Any, order: Any) -> Any:
         return self.col.find_cards(query, order)
 
-    def findNotes(self, query):
+    def findNotes(self, query: Any) -> Any:
         return self.col.find_notes(query)
 
 
@@ -38,7 +37,7 @@ def findReplace(
     fold: bool = True,
 ) -> int:
     "Find and replace fields in a note. Returns changed note count."
-    return col.backend.find_and_replace(
+    return col._backend.find_and_replace(
         nids=nids,
         search=src,
         replacement=dst,
@@ -49,14 +48,14 @@ def findReplace(
 
 
 def fieldNamesForNotes(col: Collection, nids: List[int]) -> List[str]:
-    return list(col.backend.field_names_for_notes(nids))
+    return list(col._backend.field_names_for_notes(nids))
 
 
 # Find duplicates
 ##########################################################################
 
 
-def fieldNames(col, downcase=True) -> List:
+def fieldNames(col: Collection, downcase: bool = True) -> List:
     fields: Set[str] = set()
     for m in col.models.all():
         for f in m["flds"]:
@@ -64,43 +63,3 @@ def fieldNames(col, downcase=True) -> List:
             if name not in fields:  # slower w/o
                 fields.add(name)
     return list(fields)
-
-
-# returns array of ("dupestr", [nids])
-def findDupes(
-    col: Collection, fieldName: str, search: str = ""
-) -> List[Tuple[Any, List]]:
-    # limit search to notes with applicable field name
-    if search:
-        search = "(" + search + ") "
-    search += '"%s:*"' % fieldName.replace('"', '"')
-    # go through notes
-    vals: Dict[str, List[int]] = {}
-    dupes = []
-    fields: Dict[int, int] = {}
-
-    def ordForMid(mid):
-        if mid not in fields:
-            model = col.models.get(mid)
-            for c, f in enumerate(model["flds"]):
-                if f["name"].lower() == fieldName.lower():
-                    fields[mid] = c
-                    break
-        return fields[mid]
-
-    for nid, mid, flds in col.db.all(
-        "select id, mid, flds from notes where id in " + ids2str(col.findNotes(search))
-    ):
-        flds = splitFields(flds)
-        ord = ordForMid(mid)
-        if ord is None:
-            continue
-        val = flds[ord]
-        val = stripHTMLMedia(val)
-        # empty does not count as duplicate
-        if not val:
-            continue
-        vals.setdefault(val, []).append(nid)
-        if len(vals[val]) == 2:
-            dupes.append((val, vals[val]))
-    return dupes

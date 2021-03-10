@@ -1,21 +1,21 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 import aqt.editor
 from aqt import gui_hooks
 from aqt.main import ResetReason
 from aqt.qt import *
-from aqt.utils import TR, restoreGeom, saveGeom, tooltip, tr
+from aqt.utils import TR, disable_help_button, restoreGeom, saveGeom, tooltip, tr
 
 
 class EditCurrent(QDialog):
-    def __init__(self, mw) -> None:
+    def __init__(self, mw: aqt.AnkiQt) -> None:
         QDialog.__init__(self, None, Qt.Window)
-        mw.setupDialogGC(self)
+        mw.garbage_collect_on_dialog_finish(self)
         self.mw = mw
         self.form = aqt.forms.editcurrent.Ui_Dialog()
         self.form.setupUi(self)
         self.setWindowTitle(tr(TR.EDITING_EDIT_CURRENT))
+        disable_help_button(self)
         self.setMinimumHeight(400)
         self.setMinimumWidth(250)
         self.form.buttonBox.button(QDialogButtonBox.Close).setShortcut(
@@ -47,14 +47,14 @@ class EditCurrent(QDialog):
             return
         self.editor.setNote(n)
 
-    def reopen(self, mw):
+    def reopen(self, mw: aqt.AnkiQt) -> None:
         tooltip("Please finish editing the existing card first.")
         self.onReset()
 
-    def reject(self):
+    def reject(self) -> None:
         self.saveAndClose()
 
-    def saveAndClose(self):
+    def saveAndClose(self) -> None:
         self.editor.saveNow(self._saveAndClose)
 
     def _saveAndClose(self) -> None:
@@ -73,8 +73,8 @@ class EditCurrent(QDialog):
         aqt.dialogs.markClosed("EditCurrent")
         QDialog.reject(self)
 
-    def closeWithCallback(self, onsuccess):
-        def callback():
+    def closeWithCallback(self, onsuccess: Callable[[], None]) -> None:
+        def callback() -> None:
             self._saveAndClose()
             onsuccess()
 

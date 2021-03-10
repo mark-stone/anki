@@ -5,21 +5,13 @@ from __future__ import annotations
 
 import enum
 import os
+from concurrent.futures import Future
 from typing import Callable, Tuple
 
 import aqt
-from anki.lang import without_unicode_isolation
-from anki.rsbackend import (
-    TR,
-    FullSyncProgress,
-    Interrupted,
-    NormalSyncProgress,
-    ProgressKind,
-    SyncError,
-    SyncErrorKind,
-    SyncOutput,
-    SyncStatus,
-)
+from anki.errors import Interrupted, SyncError
+from anki.lang import TR, without_unicode_isolation
+from anki.sync import SyncOutput, SyncStatus
 from anki.utils import platDesc
 from aqt.qt import (
     QDialog,
@@ -32,7 +24,14 @@ from aqt.qt import (
     QVBoxLayout,
     qconnect,
 )
-from aqt.utils import askUser, askUserDialog, showText, showWarning, tr
+from aqt.utils import (
+    askUser,
+    askUserDialog,
+    disable_help_button,
+    showText,
+    showWarning,
+    tr,
+)
 
 
 class FullSyncChoice(enum.Enum):
@@ -41,12 +40,15 @@ class FullSyncChoice(enum.Enum):
     DOWNLOAD = 2
 
 
-def get_sync_status(mw: aqt.main.AnkiQt, callback: Callable[[SyncStatus], None]):
+def get_sync_status(
+    mw: aqt.main.AnkiQt, callback: Callable[[SyncStatus], None]
+) -> None:
     auth = mw.pm.sync_auth()
     if not auth:
-        return SyncStatus(required=SyncStatus.NO_CHANGES)  # pylint:disable=no-member
+        callback(SyncStatus(required=SyncStatus.NO_CHANGES))  # pylint:disable=no-member
+        return
 
-    def on_future_done(fut):
+    def on_future_done(fut: Future) -> None:
         try:
             out = fut.result()
         except Exception as e:
@@ -55,14 +57,12 @@ def get_sync_status(mw: aqt.main.AnkiQt, callback: Callable[[SyncStatus], None])
             return
         callback(out)
 
-    mw.taskman.run_in_background(
-        lambda: mw.col.backend.sync_status(auth), on_future_done
-    )
+    mw.taskman.run_in_background(lambda: mw.col.sync_status(auth), on_future_done)
 
 
-def handle_sync_error(mw: aqt.main.AnkiQt, err: Exception):
+def handle_sync_error(mw: aqt.main.AnkiQt, err: Exception) -> None:
     if isinstance(err, SyncError):
-        if err.kind() == SyncErrorKind.AUTH_FAILED:
+        if err.is_auth_error():
             mw.pm.clear_sync_auth()
     elif isinstance(err, Interrupted):
         # no message to show
@@ -72,32 +72,32 @@ def handle_sync_error(mw: aqt.main.AnkiQt, err: Exception):
 
 def on_normal_sync_timer(mw: aqt.main.AnkiQt) -> None:
     progress = mw.col.latest_progress()
-    if progress.kind != ProgressKind.NormalSync:
+    if not progress.HasField("normal_sync"):
         return
+    sync_progress = progress.normal_sync
 
-    assert isinstance(progress.val, NormalSyncProgress)
     mw.progress.update(
-        label=f"{progress.val.added}\n{progress.val.removed}",
+        label=f"{sync_progress.added}\n{sync_progress.removed}",
         process=False,
     )
-    mw.progress.set_title(progress.val.stage)
+    mw.progress.set_title(sync_progress.stage)
 
     if mw.progress.want_cancel():
-        mw.col.backend.abort_sync()
+        mw.col.abort_sync()
 
 
 def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
     auth = mw.pm.sync_auth()
     assert auth
 
-    def on_timer():
+    def on_timer() -> None:
         on_normal_sync_timer(mw)
 
     timer = QTimer(mw)
     qconnect(timer.timeout, on_timer)
     timer.start(150)
 
-    def on_future_done(fut):
+    def on_future_done(fut: Future) -> None:
         mw.col.db.begin()
         timer.stop()
         try:
@@ -115,13 +115,9 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
         else:
             full_sync(mw, out, on_done)
 
-    if not mw.col.basicCheck():
-        showWarning("Please use Tools>Check Database")
-        return on_done()
-
     mw.col.save(trx=False)
     mw.taskman.with_progress(
-        lambda: mw.col.backend.sync_collection(auth),
+        lambda: mw.col.sync_collection(auth),
         on_future_done,
         label=tr(TR.SYNC_CHECKING),
         immediate=True,
@@ -156,36 +152,38 @@ def confirm_full_download(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> N
 
 def on_full_sync_timer(mw: aqt.main.AnkiQt) -> None:
     progress = mw.col.latest_progress()
-    if progress.kind != ProgressKind.FullSync:
+    if not progress.HasField("full_sync"):
         return
+    sync_progress = progress.full_sync
 
-    assert isinstance(progress.val, FullSyncProgress)
-    if progress.val.transferred == progress.val.total:
+    if sync_progress.transferred == sync_progress.total:
         label = tr(TR.SYNC_CHECKING)
     else:
         label = None
     mw.progress.update(
-        value=progress.val.transferred,
-        max=progress.val.total,
+        value=sync_progress.transferred,
+        max=sync_progress.total,
         process=False,
         label=label,
     )
 
     if mw.progress.want_cancel():
-        mw.col.backend.abort_sync()
+        mw.col.abort_sync()
 
 
 def full_download(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
-    mw.col.close_for_full_sync()
-
-    def on_timer():
+    def on_timer() -> None:
         on_full_sync_timer(mw)
 
     timer = QTimer(mw)
     qconnect(timer.timeout, on_timer)
     timer.start(150)
 
-    def on_future_done(fut):
+    def download() -> None:
+        mw._close_for_full_download()
+        mw.col.full_download(mw.pm.sync_auth())
+
+    def on_future_done(fut: Future) -> None:
         timer.stop()
         mw.col.reopen(after_full_sync=True)
         mw.reset()
@@ -197,7 +195,7 @@ def full_download(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
         return on_done()
 
     mw.taskman.with_progress(
-        lambda: mw.col.backend.full_download(mw.pm.sync_auth()),
+        download,
         on_future_done,
         label=tr(TR.SYNC_DOWNLOADING_FROM_ANKIWEB),
     )
@@ -206,14 +204,14 @@ def full_download(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
 def full_upload(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
     mw.col.close_for_full_sync()
 
-    def on_timer():
+    def on_timer() -> None:
         on_full_sync_timer(mw)
 
     timer = QTimer(mw)
     qconnect(timer.timeout, on_timer)
     timer.start(150)
 
-    def on_future_done(fut):
+    def on_future_done(fut: Future) -> None:
         timer.stop()
         mw.col.reopen(after_full_sync=True)
         mw.reset()
@@ -226,14 +224,17 @@ def full_upload(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
         return on_done()
 
     mw.taskman.with_progress(
-        lambda: mw.col.backend.full_upload(mw.pm.sync_auth()),
+        lambda: mw.col.full_upload(mw.pm.sync_auth()),
         on_future_done,
         label=tr(TR.SYNC_UPLOADING_TO_ANKIWEB),
     )
 
 
 def sync_login(
-    mw: aqt.main.AnkiQt, on_success: Callable[[], None], username="", password=""
+    mw: aqt.main.AnkiQt,
+    on_success: Callable[[], None],
+    username: str = "",
+    password: str = "",
 ) -> None:
     while True:
         (username, password) = get_id_and_pass_from_user(mw, username, password)
@@ -242,14 +243,16 @@ def sync_login(
         if username and password:
             break
 
-    def on_future_done(fut):
+    def on_future_done(fut: Future) -> None:
         try:
             auth = fut.result()
         except SyncError as e:
-            if e.kind() == SyncErrorKind.AUTH_FAILED:
+            if e.is_auth_error():
                 showWarning(str(e))
                 sync_login(mw, on_success, username, password)
-                return
+            else:
+                handle_sync_error(mw, e)
+            return
         except Exception as err:
             handle_sync_error(mw, err)
             return
@@ -261,7 +264,7 @@ def sync_login(
         on_success()
 
     mw.taskman.with_progress(
-        lambda: mw.col.backend.sync_login(username=username, password=password),
+        lambda: mw.col.sync_login(username=username, password=password),
         on_future_done,
     )
 
@@ -284,10 +287,11 @@ def ask_user_to_decide_direction() -> FullSyncChoice:
 
 
 def get_id_and_pass_from_user(
-    mw: aqt.main.AnkiQt, username="", password=""
+    mw: aqt.main.AnkiQt, username: str = "", password: str = ""
 ) -> Tuple[str, str]:
     diag = QDialog(mw)
     diag.setWindowTitle("Anki")
+    disable_help_button(diag)
     diag.setWindowModality(Qt.WindowModal)
     vbox = QVBoxLayout()
     info_label = QLabel(

@@ -1,19 +1,32 @@
 # coding: utf-8
 
 import copy
+import os
 import time
+from typing import Tuple
+
+import pytest
 
 from anki import hooks
 from anki.consts import *
 from anki.lang import without_unicode_isolation
-from anki.schedv2 import UnburyCurrentDeckMode
+from anki.schedv2 import UnburyCurrentDeck
 from anki.utils import intTime
 from tests.shared import getEmptyCol as getEmptyColOrig
 
 
+# This file is used to exercise both the legacy Python 2.1 scheduler,
+# and the experimental new one in Rust. Most tests run on both, but a few
+# tests have been implemented separately where the behaviour differs.
+def is_2021() -> bool:
+    return "2021" in os.getenv("PYTEST_CURRENT_TEST")
+
+
 def getEmptyCol():
     col = getEmptyColOrig()
-    col.changeSchedulerVer(2)
+    col.upgrade_to_v2_scheduler()
+    if is_2021():
+        col.set_2021_test_scheduler_enabled(True)
     return col
 
 
@@ -25,7 +38,7 @@ def test_clock():
 
 def checkRevIvl(col, c, targetIvl):
     min, max = col.sched._fuzzIvlRange(targetIvl)
-    return min <= c.ivl <= max
+    assert min <= c.ivl <= max
 
 
 def test_basics():
@@ -150,7 +163,6 @@ def test_learn():
     col.sched.answerCard(c, 1)
     # it should have three reps left to graduation
     assert c.left % 1000 == 3
-    assert c.left // 1000 == 3
     # it should be due in 30 seconds
     t = round(c.due - time.time())
     assert t >= 25 and t <= 40
@@ -160,7 +172,6 @@ def test_learn():
     dueIn = c.due - time.time()
     assert 178 <= dueIn <= 180 * 1.25
     assert c.left % 1000 == 2
-    assert c.left // 1000 == 2
     # check log is accurate
     log = col.db.first("select * from revlog order by id desc")
     assert log[3] == 3
@@ -172,7 +183,6 @@ def test_learn():
     dueIn = c.due - time.time()
     assert 599 <= dueIn <= 600 * 1.25
     assert c.left % 1000 == 1
-    assert c.left // 1000 == 1
     # the next pass should graduate the card
     assert c.queue == QUEUE_TYPE_LRN
     assert c.type == CARD_TYPE_LRN
@@ -185,10 +195,12 @@ def test_learn():
     # or normal removal
     c.type = CARD_TYPE_NEW
     c.queue = QUEUE_TYPE_LRN
+    c.flush()
+    col.sched.reset()
     col.sched.answerCard(c, 4)
     assert c.type == CARD_TYPE_REV
     assert c.queue == QUEUE_TYPE_REV
-    assert checkRevIvl(col, c, 4)
+    checkRevIvl(col, c, 4)
     # revlog should have been updated each time
     assert col.db.scalar("select count() from revlog where type = 0") == 5
 
@@ -276,6 +288,9 @@ def test_learn_day():
     note = col.newNote()
     note["Front"] = "one"
     col.addNote(note)
+    note = col.newNote()
+    note["Front"] = "two"
+    col.addNote(note)
     col.sched.reset()
     c = col.sched.getCard()
     conf = col.sched._cardConf(c)
@@ -285,12 +300,14 @@ def test_learn_day():
     col.sched.answerCard(c, 3)
     # two reps to graduate, 1 more today
     assert c.left % 1000 == 3
-    assert c.left // 1000 == 1
-    assert col.sched.counts() == (0, 1, 0)
-    c = col.sched.getCard()
+    assert col.sched.counts() == (1, 1, 0)
+    c.load()
     ni = col.sched.nextIvl
     assert ni(c, 3) == 86400
-    # answering it will place it in queue 3
+    # answer the other dummy card
+    col.sched.answerCard(col.sched.getCard(), 4)
+    # answering the first one will place it in queue 3
+    c = col.sched.getCard()
     col.sched.answerCard(c, 3)
     assert c.due == col.sched.today + 1
     assert c.queue == QUEUE_TYPE_DAY_LEARN_RELEARN
@@ -299,7 +316,11 @@ def test_learn_day():
     c.due -= 1
     c.flush()
     col.reset()
-    assert col.sched.counts() == (0, 1, 0)
+    if is_2021():
+        # it appears in the review queue
+        assert col.sched.counts() == (0, 0, 1)
+    else:
+        assert col.sched.counts() == (0, 1, 0)
     c = col.sched.getCard()
     # nextIvl should work
     assert ni(c, 3) == 86400 * 2
@@ -361,7 +382,7 @@ def test_reviews():
     col.sched.answerCard(c, 2)
     assert c.queue == QUEUE_TYPE_REV
     # the new interval should be (100) * 1.2 = 120
-    assert checkRevIvl(col, c, 120)
+    checkRevIvl(col, c, 120)
     assert c.due == col.sched.today + c.ivl
     # factor should have been decremented
     assert c.factor == 2350
@@ -374,7 +395,7 @@ def test_reviews():
     c.flush()
     col.sched.answerCard(c, 3)
     # the new interval should be (100 + 8/2) * 2.5 = 260
-    assert checkRevIvl(col, c, 260)
+    checkRevIvl(col, c, 260)
     assert c.due == col.sched.today + c.ivl
     # factor should have been left alone
     assert c.factor == STARTING_FACTOR
@@ -384,7 +405,7 @@ def test_reviews():
     c.flush()
     col.sched.answerCard(c, 4)
     # the new interval should be (100 + 8) * 2.5 * 1.3 = 351
-    assert checkRevIvl(col, c, 351)
+    checkRevIvl(col, c, 351)
     assert c.due == col.sched.today + c.ivl
     # factor should have been increased
     assert c.factor == 2650
@@ -408,9 +429,10 @@ def test_reviews():
     assert c.queue == QUEUE_TYPE_SUSPENDED
     c.load()
     assert c.queue == QUEUE_TYPE_SUSPENDED
+    assert "leech" in c.note().tags
 
 
-def test_review_limits():
+def review_limits_setup() -> Tuple[anki.collection.Collection, Dict]:
     col = getEmptyCol()
 
     parent = col.decks.get(col.decks.id("parent"))
@@ -444,17 +466,49 @@ def test_review_limits():
         c.due = 0
         c.flush()
 
+    return col, child
+
+
+def test_review_limits():
+    if is_2021():
+        pytest.skip("old sched only")
+    col, child = review_limits_setup()
+
     tree = col.sched.deck_due_tree().children
     # (('parent', 1514457677462, 5, 0, 0, (('child', 1514457677463, 5, 0, 0, ()),)))
     assert tree[0].review_count == 5  # parent
-    assert tree[0].children[0].review_count == 5  # child
+    assert tree[0].children[0].review_count == 10  # child
 
     # .counts() should match
     col.decks.select(child["id"])
     col.sched.reset()
-    assert col.sched.counts() == (0, 0, 5)
+    assert col.sched.counts() == (0, 0, 10)
 
     # answering a card in the child should decrement parent count
+    c = col.sched.getCard()
+    col.sched.answerCard(c, 3)
+    assert col.sched.counts() == (0, 0, 9)
+
+    tree = col.sched.deck_due_tree().children
+    assert tree[0].review_count == 4  # parent
+    assert tree[0].children[0].review_count == 9  # child
+
+
+def test_review_limits_new():
+    if not is_2021():
+        pytest.skip("new sched only")
+    col, child = review_limits_setup()
+
+    tree = col.sched.deck_due_tree().children
+    assert tree[0].review_count == 5  # parent
+    assert tree[0].children[0].review_count == 5  # child capped by parent
+
+    # child .counts() are bound by parents
+    col.decks.select(child["id"])
+    col.sched.reset()
+    assert col.sched.counts() == (0, 0, 5)
+
+    # answering a card in the child should decrement both child and parent count
     c = col.sched.getCard()
     col.sched.answerCard(c, 3)
     assert col.sched.counts() == (0, 0, 4)
@@ -563,17 +617,20 @@ def test_nextIvl():
     assert ni(c, 4) == 4 * 86400
     # lapsed cards
     ##################################################
-    c.type = CARD_TYPE_REV
+    c.type = CARD_TYPE_RELEARNING
     c.ivl = 100
     c.factor = STARTING_FACTOR
+    c.flush()
     assert ni(c, 1) == 60
     assert ni(c, 3) == 100 * 86400
     assert ni(c, 4) == 101 * 86400
     # review cards
     ##################################################
+    c.type = CARD_TYPE_REV
     c.queue = QUEUE_TYPE_REV
     c.ivl = 100
     c.factor = STARTING_FACTOR
+    c.flush()
     # failing it should put it at 60s
     assert ni(c, 1) == 60
     # or 1 day if relearn is false
@@ -612,13 +669,13 @@ def test_bury():
     col.reset()
     assert not col.sched.getCard()
 
-    col.sched.unbury_cards_in_current_deck(UnburyCurrentDeckMode.USER_ONLY)
+    col.sched.unbury_cards_in_current_deck(UnburyCurrentDeck.USER_ONLY)
     c.load()
     assert c.queue == QUEUE_TYPE_NEW
     c2.load()
     assert c2.queue == QUEUE_TYPE_SIBLING_BURIED
 
-    col.sched.unbury_cards_in_current_deck(UnburyCurrentDeckMode.SCHED_ONLY)
+    col.sched.unbury_cards_in_current_deck(UnburyCurrentDeck.SCHED_ONLY)
     c2.load()
     assert c2.queue == QUEUE_TYPE_NEW
 
@@ -715,7 +772,7 @@ def test_filt_reviewing_early_normal():
 
     # answer 'good'
     col.sched.answerCard(c, 3)
-    checkRevIvl(col, c, 90)
+    checkRevIvl(col, c, int(75 * 2.5))
     assert c.due == col.sched.today + c.ivl
     assert not c.odue
     # should not be in learning
@@ -752,7 +809,7 @@ def test_filt_keep_lrn_state():
     col.sched.answerCard(c, 1)
 
     assert c.type == CARD_TYPE_LRN and c.queue == QUEUE_TYPE_LRN
-    assert c.left == 3003
+    assert c.left % 1000 == 3
 
     col.sched.answerCard(c, 3)
     assert c.type == CARD_TYPE_LRN and c.queue == QUEUE_TYPE_LRN
@@ -765,7 +822,7 @@ def test_filt_keep_lrn_state():
     # card should still be in learning state
     c.load()
     assert c.type == CARD_TYPE_LRN and c.queue == QUEUE_TYPE_LRN
-    assert c.left == 2002
+    assert c.left % 1000 == 2
 
     # should be able to advance learning steps
     col.sched.answerCard(c, 3)
@@ -776,7 +833,7 @@ def test_filt_keep_lrn_state():
     col.sched.empty_filtered_deck(did)
     c.load()
     assert c.type == CARD_TYPE_LRN and c.queue == QUEUE_TYPE_LRN
-    assert c.left == 1001
+    assert c.left % 1000 == 1
     assert c.due - intTime() > 60 * 60
 
 
@@ -800,9 +857,16 @@ def test_preview():
     col.reset()
     # grab the first card
     c = col.sched.getCard()
-    assert col.sched.answerButtons(c) == 2
+
+    if is_2021():
+        passing_grade = 4
+    else:
+        passing_grade = 2
+
+    assert col.sched.answerButtons(c) == passing_grade
     assert col.sched.nextIvl(c, 1) == 600
-    assert col.sched.nextIvl(c, 2) == 0
+    assert col.sched.nextIvl(c, passing_grade) == 0
+
     # failing it will push its due time back
     due = c.due
     col.sched.answerCard(c, 1)
@@ -813,7 +877,7 @@ def test_preview():
     assert c2.id != c.id
 
     # passing it will remove it
-    col.sched.answerCard(c2, 2)
+    col.sched.answerCard(c2, passing_grade)
     assert c2.queue == QUEUE_TYPE_NEW
     assert c2.reps == 0
     assert c2.type == CARD_TYPE_NEW
@@ -850,14 +914,22 @@ def test_ordcycle():
     note["Back"] = "1"
     col.addNote(note)
     assert col.cardCount() == 3
+
+    conf = col.decks.get_config(1)
+    conf["new"]["bury"] = False
+    col.decks.save(conf)
     col.reset()
+
     # ordinals should arrive in order
-    assert col.sched.getCard().ord == 0
-    assert col.sched.getCard().ord == 1
-    assert col.sched.getCard().ord == 2
+    for i in range(3):
+        c = col.sched.getCard()
+        assert c.ord == i
+        col.sched.answerCard(c, 4)
 
 
 def test_counts_idx():
+    if is_2021():
+        pytest.skip("old sched only")
     col = getEmptyCol()
     note = col.newNote()
     note["Front"] = "one"
@@ -881,57 +953,88 @@ def test_counts_idx():
     assert col.sched.counts() == (0, 1, 0)
 
 
+def test_counts_idx_new():
+    if not is_2021():
+        pytest.skip("new sched only")
+    col = getEmptyCol()
+    note = col.newNote()
+    note["Front"] = "one"
+    note["Back"] = "two"
+    col.addNote(note)
+    note = col.newNote()
+    note["Front"] = "two"
+    note["Back"] = "two"
+    col.addNote(note)
+    col.reset()
+    assert col.sched.counts() == (2, 0, 0)
+    c = col.sched.getCard()
+    # getCard does not decrement counts
+    assert col.sched.counts() == (2, 0, 0)
+    assert col.sched.countIdx(c) == 0
+    # answer to move to learn queue
+    col.sched.answerCard(c, 1)
+    assert col.sched.counts() == (1, 1, 0)
+    assert col.sched.countIdx(c) == 1
+    # fetching next will not decrement the count
+    c = col.sched.getCard()
+    assert col.sched.counts() == (1, 1, 0)
+    assert col.sched.countIdx(c) == 0
+
+
 def test_repCounts():
     col = getEmptyCol()
     note = col.newNote()
     note["Front"] = "one"
     col.addNote(note)
-    col.reset()
-    # lrnReps should be accurate on pass/fail
-    assert col.sched.counts() == (1, 0, 0)
-    col.sched.answerCard(col.sched.getCard(), 1)
-    assert col.sched.counts() == (0, 1, 0)
-    col.sched.answerCard(col.sched.getCard(), 1)
-    assert col.sched.counts() == (0, 1, 0)
-    col.sched.answerCard(col.sched.getCard(), 3)
-    assert col.sched.counts() == (0, 1, 0)
-    col.sched.answerCard(col.sched.getCard(), 1)
-    assert col.sched.counts() == (0, 1, 0)
-    col.sched.answerCard(col.sched.getCard(), 3)
-    assert col.sched.counts() == (0, 1, 0)
-    col.sched.answerCard(col.sched.getCard(), 3)
-    assert col.sched.counts() == (0, 0, 0)
     note = col.newNote()
     note["Front"] = "two"
     col.addNote(note)
     col.reset()
-    # initial pass should be correct too
-    col.sched.answerCard(col.sched.getCard(), 3)
-    assert col.sched.counts() == (0, 1, 0)
+    # lrnReps should be accurate on pass/fail
+    assert col.sched.counts() == (2, 0, 0)
     col.sched.answerCard(col.sched.getCard(), 1)
+    assert col.sched.counts() == (1, 1, 0)
+    col.sched.answerCard(col.sched.getCard(), 1)
+    assert col.sched.counts() == (0, 2, 0)
+    col.sched.answerCard(col.sched.getCard(), 3)
+    assert col.sched.counts() == (0, 2, 0)
+    col.sched.answerCard(col.sched.getCard(), 1)
+    assert col.sched.counts() == (0, 2, 0)
+    col.sched.answerCard(col.sched.getCard(), 3)
     assert col.sched.counts() == (0, 1, 0)
     col.sched.answerCard(col.sched.getCard(), 4)
     assert col.sched.counts() == (0, 0, 0)
-    # immediate graduate should work
     note = col.newNote()
     note["Front"] = "three"
     col.addNote(note)
+    note = col.newNote()
+    note["Front"] = "four"
+    col.addNote(note)
     col.reset()
+    # initial pass and immediate graduate should be correct too
+    assert col.sched.counts() == (2, 0, 0)
+    col.sched.answerCard(col.sched.getCard(), 3)
+    assert col.sched.counts() == (1, 1, 0)
+    col.sched.answerCard(col.sched.getCard(), 4)
+    assert col.sched.counts() == (0, 1, 0)
     col.sched.answerCard(col.sched.getCard(), 4)
     assert col.sched.counts() == (0, 0, 0)
     # and failing a review should too
     note = col.newNote()
-    note["Front"] = "three"
+    note["Front"] = "five"
     col.addNote(note)
     c = note.cards()[0]
     c.type = CARD_TYPE_REV
     c.queue = QUEUE_TYPE_REV
     c.due = col.sched.today
     c.flush()
+    note = col.newNote()
+    note["Front"] = "six"
+    col.addNote(note)
     col.reset()
-    assert col.sched.counts() == (0, 0, 1)
+    assert col.sched.counts() == (1, 0, 1)
     col.sched.answerCard(col.sched.getCard(), 1)
-    assert col.sched.counts() == (0, 1, 0)
+    assert col.sched.counts() == (1, 1, 0)
 
 
 def test_timing():
@@ -967,12 +1070,25 @@ def test_collapse():
     note = col.newNote()
     note["Front"] = "one"
     col.addNote(note)
+    # and another, so we don't get the same twice in a row
+    note = col.newNote()
+    note["Front"] = "two"
+    col.addNote(note)
     col.reset()
-    # test collapsing
+    # first note
     c = col.sched.getCard()
     col.sched.answerCard(c, 1)
-    c = col.sched.getCard()
-    col.sched.answerCard(c, 4)
+    # second note
+    c2 = col.sched.getCard()
+    assert c2.nid != c.nid
+    col.sched.answerCard(c2, 1)
+    # first should become available again, despite it being due in the future
+    c3 = col.sched.getCard()
+    assert c3.due > intTime()
+    col.sched.answerCard(c3, 4)
+    # answer other
+    c4 = col.sched.getCard()
+    col.sched.answerCard(c4, 4)
     assert not col.sched.getCard()
 
 
@@ -1048,13 +1164,20 @@ def test_deckFlow():
     note["Front"] = "three"
     default1 = note.model()["did"] = col.decks.id("Default::1")
     col.addNote(note)
-    # should get top level one first, then ::1, then ::2
     col.reset()
     assert col.sched.counts() == (3, 0, 0)
-    for i in "one", "three", "two":
-        c = col.sched.getCard()
-        assert c.note()["Front"] == i
-        col.sched.answerCard(c, 3)
+    if is_2021():
+        # cards arrive in position order by default
+        for i in "one", "two", "three":
+            c = col.sched.getCard()
+            assert c.note()["Front"] == i
+            col.sched.answerCard(c, 3)
+    else:
+        # should get top level one first, then ::1, then ::2
+        for i in "one", "three", "two":
+            c = col.sched.getCard()
+            assert c.note()["Front"] == i
+            col.sched.answerCard(c, 3)
 
 
 def test_reorder():
@@ -1119,15 +1242,16 @@ def test_resched():
     note["Front"] = "one"
     col.addNote(note)
     c = note.cards()[0]
-    col.sched.reschedCards([c.id], 0, 0)
+    col.sched.set_due_date([c.id], "0")
     c.load()
     assert c.due == col.sched.today
     assert c.ivl == 1
     assert c.queue == QUEUE_TYPE_REV and c.type == CARD_TYPE_REV
-    col.sched.reschedCards([c.id], 1, 1)
+    # make it due tomorrow
+    col.sched.set_due_date([c.id], "1")
     c.load()
     assert c.due == col.sched.today + 1
-    assert c.ivl == +1
+    assert c.ivl == 1
 
 
 def test_norelearn():
@@ -1176,64 +1300,6 @@ def test_failmult():
     assert c.ivl == 50
     col.sched.answerCard(c, 1)
     assert c.ivl == 25
-
-
-def test_moveVersions():
-    col = getEmptyCol()
-    col.changeSchedulerVer(1)
-
-    n = col.newNote()
-    n["Front"] = "one"
-    col.addNote(n)
-
-    # make it a learning card
-    col.reset()
-    c = col.sched.getCard()
-    col.sched.answerCard(c, 1)
-
-    # the move to v2 should reset it to new
-    col.changeSchedulerVer(2)
-    c.load()
-    assert c.queue == QUEUE_TYPE_NEW
-    assert c.type == CARD_TYPE_NEW
-
-    # fail it again, and manually bury it
-    col.reset()
-    c = col.sched.getCard()
-    col.sched.answerCard(c, 1)
-    col.sched.bury_cards([c.id])
-    c.load()
-    assert c.queue == QUEUE_TYPE_MANUALLY_BURIED
-
-    # revert to version 1
-    col.changeSchedulerVer(1)
-
-    # card should have moved queues
-    c.load()
-    assert c.queue == QUEUE_TYPE_SIBLING_BURIED
-
-    # and it should be new again when unburied
-    col.sched.unbury_cards_in_current_deck()
-    c.load()
-    assert c.type == CARD_TYPE_NEW and c.queue == QUEUE_TYPE_NEW
-
-    # make sure relearning cards transition correctly to v1
-    col.changeSchedulerVer(2)
-    # card with 100 day interval, answering again
-    col.sched.reschedCards([c.id], 100, 100)
-    c.load()
-    c.due = 0
-    c.flush()
-    conf = col.sched._cardConf(c)
-    conf["lapse"]["mult"] = 0.5
-    col.decks.save(conf)
-    col.sched.reset()
-    c = col.sched.getCard()
-    col.sched.answerCard(c, 1)
-    # due should be correctly set when removed from learning early
-    col.changeSchedulerVer(1)
-    c.load()
-    assert c.due == 50
 
 
 # cards with a due date earlier than the collection should retain

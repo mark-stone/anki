@@ -6,7 +6,11 @@ use super::{
     sqlwriter::{RequiredTable, SqlWriter},
 };
 use crate::{
-    card::CardID, card::CardType, collection::Collection, config::SortKind, err::Result,
+    card::CardID,
+    card::CardType,
+    collection::Collection,
+    config::{BoolKey, SortKind},
+    err::Result,
     search::parser::parse,
 };
 
@@ -91,19 +95,32 @@ impl Collection {
 
     /// Place the matched card ids into a temporary 'search_cids' table
     /// instead of returning them. Use clear_searched_cards() to remove it.
-    pub(crate) fn search_cards_into_table(&mut self, search: &str, mode: SortMode) -> Result<()> {
+    /// Returns number of added cards.
+    pub(crate) fn search_cards_into_table(
+        &mut self,
+        search: &str,
+        mode: SortMode,
+    ) -> Result<usize> {
         let top_node = Node::Group(parse(search)?);
         let writer = SqlWriter::new(self);
+        let want_order = mode != SortMode::NoOrder;
 
         let (mut sql, args) = writer.build_cards_query(&top_node, mode.required_table())?;
         self.add_order(&mut sql, mode)?;
 
-        self.storage.setup_searched_cards_table()?;
+        if want_order {
+            self.storage
+                .setup_searched_cards_table_to_preserve_order()?;
+        } else {
+            self.storage.setup_searched_cards_table()?;
+        }
         let sql = format!("insert into search_cids {}", sql);
 
-        self.storage.db.prepare(&sql)?.execute(&args)?;
-
-        Ok(())
+        self.storage
+            .db
+            .prepare(&sql)?
+            .execute(&args)
+            .map_err(Into::into)
     }
 
     /// If the sort mode is based on a config setting, look it up.
@@ -111,7 +128,7 @@ impl Collection {
         if mode == &SortMode::FromConfig {
             *mode = SortMode::Builtin {
                 kind: self.get_browser_sort_kind(),
-                reverse: self.get_browser_sort_reverse(),
+                reverse: self.get_bool(BoolKey::BrowserSortBackwards),
             }
         }
     }

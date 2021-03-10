@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
@@ -8,16 +7,19 @@ import html
 import json
 import re
 import unicodedata as ucd
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Match, Optional, Sequence, Tuple, Union
 
 from PyQt5.QtCore import Qt
 
 from anki import hooks
 from anki.cards import Card
+from anki.collection import Config
 from anki.utils import stripHTML
 from aqt import AnkiQt, gui_hooks
+from aqt.profiles import VideoDriver
 from aqt.qt import *
-from aqt.sound import av_player, getAudio, play_clicked_audio
+from aqt.scheduling import set_due_date_dialog
+from aqt.sound import av_player, play_clicked_audio, record_audio
 from aqt.theme import theme_manager
 from aqt.toolbar import BottomBar
 from aqt.utils import (
@@ -95,9 +97,7 @@ class Reviewer:
             mins = int(round(elapsed[0] / 60))
             part2 = tr(TR.STUDYING_MINUTE, count=mins)
             fin = tr(TR.STUDYING_FINISH)
-            diag = askUserDialog(
-                "%s %s" % (part1, part2), [tr(TR.STUDYING_CONTINUE), fin]
-            )
+            diag = askUserDialog(f"{part1} {part2}", [tr(TR.STUDYING_CONTINUE), fin])
             diag.setIcon(QMessageBox.Information)
             if diag.run() == fin:
                 return self.mw.moveToState("deckBrowser")
@@ -138,17 +138,15 @@ class Reviewer:
     def revHtml(self) -> str:
         extra = self.mw.col.conf.get("reviewExtra", "")
         fade = ""
-        if self.mw.pm.glMode() == "software":
+        if self.mw.pm.video_driver() == VideoDriver.Software:
             fade = "<script>qFade=0;</script>"
-        return """
+        return f"""
 <div id=_mark>&#x2605;</div>
 <div id=_flag>&#x2691;</div>
-{}
+{fade}
 <div id=qa></div>
-{}
-""".format(
-            fade, extra
-        )
+{extra}
+"""
 
     def _initWeb(self) -> None:
         self._reps = 0
@@ -157,8 +155,8 @@ class Reviewer:
             self.revHtml(),
             css=["css/reviewer.css"],
             js=[
-                "js/vendor/jquery.js",
-                "js/vendor/browsersel.js",
+                "js/vendor/jquery.min.js",
+                "js/vendor/css_browser_selector.min.js",
                 "js/mathjax.js",
                 "js/vendor/mathjax/tex-chtml.js",
                 "js/reviewer.js",
@@ -170,7 +168,7 @@ class Reviewer:
         self.bottom.web.stdHtml(
             self._bottomHTML(),
             css=["css/toolbar-bottom.css", "css/reviewer-bottom.css"],
-            js=["js/vendor/jquery.js", "js/reviewer-bottom.js"],
+            js=["js/vendor/jquery.min.js", "js/reviewer-bottom.js"],
             context=ReviewerBottomBar(self),
         )
 
@@ -205,9 +203,9 @@ class Reviewer:
 
         bodyclass = theme_manager.body_classes_for_card_ord(c.ord)
 
-        self.web.eval("_showQuestion(%s,'%s');" % (json.dumps(q), bodyclass))
-        self._drawFlag()
-        self._drawMark()
+        self.web.eval(f"_showQuestion({json.dumps(q)},'{bodyclass}');")
+        self._update_flag_icon()
+        self._update_mark_icon()
         self._showAnswerButton()
         self.mw.web.setFocus()
         # user hook
@@ -217,11 +215,14 @@ class Reviewer:
         print("use card.autoplay() instead of reviewer.autoplay(card)")
         return card.autoplay()
 
-    def _drawFlag(self) -> None:
-        self.web.eval("_drawFlag(%s);" % self.card.userFlag())
+    def _update_flag_icon(self) -> None:
+        self.web.eval(f"_drawFlag({self.card.user_flag()});")
 
-    def _drawMark(self) -> None:
-        self.web.eval("_drawMark(%s);" % json.dumps(self.card.note().hasTag("marked")))
+    def _update_mark_icon(self) -> None:
+        self.web.eval(f"_drawMark({json.dumps(self.card.note().has_tag('marked'))});")
+
+    _drawMark = _update_mark_icon
+    _drawFlag = _update_flag_icon
 
     # Showing the answer
     ##########################################################################
@@ -246,7 +247,7 @@ class Reviewer:
         a = self._mungeQA(a)
         a = gui_hooks.card_will_show(a, c, "reviewAnswer")
         # render and update bottom
-        self.web.eval("_showAnswer(%s);" % json.dumps(a))
+        self.web.eval(f"_showAnswer({json.dumps(a)});")
         self._showEaseButtons()
         self.mw.web.setFocus()
         # user hook
@@ -289,16 +290,17 @@ class Reviewer:
             ("m", self.showContextMenu),
             ("r", self.replayAudio),
             (Qt.Key_F5, self.replayAudio),
-            ("Ctrl+1", lambda: self.setFlag(1)),
-            ("Ctrl+2", lambda: self.setFlag(2)),
-            ("Ctrl+3", lambda: self.setFlag(3)),
-            ("Ctrl+4", lambda: self.setFlag(4)),
-            ("*", self.onMark),
-            ("=", self.onBuryNote),
-            ("-", self.onBuryCard),
-            ("!", self.onSuspend),
-            ("@", self.onSuspendCard),
-            ("Ctrl+Delete", self.onDelete),
+            ("Ctrl+1", lambda: self.set_flag_on_current_card(1)),
+            ("Ctrl+2", lambda: self.set_flag_on_current_card(2)),
+            ("Ctrl+3", lambda: self.set_flag_on_current_card(3)),
+            ("Ctrl+4", lambda: self.set_flag_on_current_card(4)),
+            ("*", self.toggle_mark_on_current_note),
+            ("=", self.bury_current_note),
+            ("-", self.bury_current_card),
+            ("!", self.suspend_current_note),
+            ("@", self.suspend_current_card),
+            ("Ctrl+Delete", self.delete_current_note),
+            ("Ctrl+Shift+D", self.on_set_due),
             ("v", self.onReplayRecorded),
             ("Shift+v", self.onRecordVoice),
             ("o", self.onOptions),
@@ -396,13 +398,12 @@ class Reviewer:
                 return re.sub(self.typeAnsPat, "", buf)
         return re.sub(
             self.typeAnsPat,
-            """
+            f"""
 <center>
 <input type=text id=typeans onkeypress="_typeAnsPress();"
-   style="font-family: '%s'; font-size: %spx;">
+   style="font-family: '{self.typeFont}'; font-size: {self.typeSize}px;">
 </center>
-"""
-            % (self.typeFont, self.typeSize),
+""",
             buf,
         )
 
@@ -425,7 +426,7 @@ class Reviewer:
         # compare with typed answer
         res = self.correct(given, cor, showBad=False)
         # and update the type answer area
-        def repl(match):
+        def repl(match: Match) -> str:
             # can't pass a string in directly, and can't use re.escape as it
             # escapes too much
             s = """
@@ -437,17 +438,17 @@ class Reviewer:
             if hadHR:
                 # a hack to ensure the q/a separator falls before the answer
                 # comparison when user is using {{FrontSide}}
-                s = "<hr id=answer>" + s
+                s = f"<hr id=answer>{s}"
             return s
 
         return re.sub(self.typeAnsPat, repl, buf)
 
-    def _contentForCloze(self, txt: str, idx) -> str:
+    def _contentForCloze(self, txt: str, idx: int) -> str:
         matches = re.findall(r"\{\{c%s::(.+?)\}\}" % idx, txt, re.DOTALL)
         if not matches:
             return None
 
-        def noHint(txt):
+        def noHint(txt: str) -> str:
             if "::" in txt:
                 return txt.split("::")[0]
             return txt
@@ -503,13 +504,13 @@ class Reviewer:
         givenElems, correctElems = self.tokenizeComparison(given, correct)
 
         def good(s: str) -> str:
-            return "<span class=typeGood>" + html.escape(s) + "</span>"
+            return f"<span class=typeGood>{html.escape(s)}</span>"
 
         def bad(s: str) -> str:
-            return "<span class=typeBad>" + html.escape(s) + "</span>"
+            return f"<span class=typeBad>{html.escape(s)}</span>"
 
         def missed(s: str) -> str:
-            return "<span class=typeMissed>" + html.escape(s) + "</span>"
+            return f"<span class=typeMissed>{html.escape(s)}</span>"
 
         if given == correct:
             res = good(given)
@@ -528,14 +529,14 @@ class Reviewer:
                     res += good(txt)
                 else:
                     res += missed(txt)
-        res = "<div><code id=typeans>" + res + "</code></div>"
+        res = f"<div><code id=typeans>{res}</code></div>"
         return res
 
     def _noLoneMarks(self, s: str) -> str:
         # ensure a combining character at the start does not join to
         # previous text
         if s and ucd.category(s[0]).startswith("M"):
-            return "\xa0" + s
+            return f"\xa0{s}"
         return s
 
     def _getTypedAnswer(self) -> None:
@@ -599,7 +600,7 @@ time = %(time)d;
 
     def _showEaseButtons(self) -> None:
         middle = self._answerButtons()
-        self.bottom.web.eval("showAnswer(%s);" % json.dumps(middle))
+        self.bottom.web.eval(f"showAnswer({json.dumps(middle)});")
 
     def _remaining(self) -> str:
         if not self.mw.col.conf["dueCounts"]:
@@ -610,11 +611,11 @@ time = %(time)d;
         else:
             counts = list(self.mw.col.sched.counts(self.card))
         idx = self.mw.col.sched.countIdx(self.card)
-        counts[idx] = "<u>%s</u>" % (counts[idx])
+        counts[idx] = f"<u>{counts[idx]}</u>"
         space = " + "
-        ctxt = "<span class=new-count>%s</span>" % counts[0]
-        ctxt += space + "<span class=learn-count>%s</span>" % counts[1]
-        ctxt += space + "<span class=review-count>%s</span>" % counts[2]
+        ctxt = f"<span class=new-count>{counts[0]}</span>"
+        ctxt += f"{space}<span class=learn-count>{counts[1]}</span>"
+        ctxt += f"{space}<span class=review-count>{counts[2]}</span>"
         return ctxt
 
     def _defaultEase(self) -> int:
@@ -651,7 +652,7 @@ time = %(time)d;
     def _answerButtons(self) -> str:
         default = self._defaultEase()
 
-        def but(i, label):
+        def but(i: int, label: str) -> str:
             if i == default:
                 extra = """id="defease" class="focus" """
             else:
@@ -680,7 +681,7 @@ time = %(time)d;
         if not self.mw.col.conf["estTimes"]:
             return "<div class=spacer></div>"
         txt = self.mw.col.sched.nextIvlStr(self.card, i, True) or "&nbsp;"
-        return "<span class=nobold>%s</span><br>" % txt
+        return f"<span class=nobold>{txt}</span><br>"
 
     # Leeches
     ##########################################################################
@@ -689,15 +690,15 @@ time = %(time)d;
         # for now
         s = tr(TR.STUDYING_CARD_WAS_A_LEECH)
         if card.queue < 0:
-            s += " " + tr(TR.STUDYING_IT_HAS_BEEN_SUSPENDED)
+            s += f" {tr(TR.STUDYING_IT_HAS_BEEN_SUSPENDED)}"
         tooltip(s)
 
     # Context menu
     ##########################################################################
 
     # note the shortcuts listed here also need to be defined above
-    def _contextMenu(self):
-        currentFlag = self.card and self.card.userFlag()
+    def _contextMenu(self) -> List[Any]:
+        currentFlag = self.card and self.card.user_flag()
         opts = [
             [
                 tr(TR.STUDYING_FLAG_CARD),
@@ -705,35 +706,36 @@ time = %(time)d;
                     [
                         tr(TR.ACTIONS_RED_FLAG),
                         "Ctrl+1",
-                        lambda: self.setFlag(1),
+                        lambda: self.set_flag_on_current_card(1),
                         dict(checked=currentFlag == 1),
                     ],
                     [
                         tr(TR.ACTIONS_ORANGE_FLAG),
                         "Ctrl+2",
-                        lambda: self.setFlag(2),
+                        lambda: self.set_flag_on_current_card(2),
                         dict(checked=currentFlag == 2),
                     ],
                     [
                         tr(TR.ACTIONS_GREEN_FLAG),
                         "Ctrl+3",
-                        lambda: self.setFlag(3),
+                        lambda: self.set_flag_on_current_card(3),
                         dict(checked=currentFlag == 3),
                     ],
                     [
                         tr(TR.ACTIONS_BLUE_FLAG),
                         "Ctrl+4",
-                        lambda: self.setFlag(4),
+                        lambda: self.set_flag_on_current_card(4),
                         dict(checked=currentFlag == 4),
                     ],
                 ],
             ],
-            [tr(TR.STUDYING_MARK_NOTE), "*", self.onMark],
-            [tr(TR.STUDYING_BURY_CARD), "-", self.onBuryCard],
-            [tr(TR.STUDYING_BURY_NOTE), "=", self.onBuryNote],
-            [tr(TR.ACTIONS_SUSPEND_CARD), "@", self.onSuspendCard],
-            [tr(TR.STUDYING_SUSPEND_NOTE), "!", self.onSuspend],
-            [tr(TR.STUDYING_DELETE_NOTE), "Ctrl+Delete", self.onDelete],
+            [tr(TR.STUDYING_MARK_NOTE), "*", self.toggle_mark_on_current_note],
+            [tr(TR.STUDYING_BURY_CARD), "-", self.bury_current_card],
+            [tr(TR.STUDYING_BURY_NOTE), "=", self.bury_current_note],
+            [tr(TR.ACTIONS_SET_DUE_DATE), "Ctrl+Shift+D", self.on_set_due],
+            [tr(TR.ACTIONS_SUSPEND_CARD), "@", self.suspend_current_card],
+            [tr(TR.STUDYING_SUSPEND_NOTE), "!", self.suspend_current_note],
+            [tr(TR.STUDYING_DELETE_NOTE), "Ctrl+Delete", self.delete_current_note],
             [tr(TR.ACTIONS_OPTIONS), "O", self.onOptions],
             None,
             [tr(TR.ACTIONS_REPLAY_AUDIO), "R", self.replayAudio],
@@ -754,7 +756,7 @@ time = %(time)d;
         qtMenuShortcutWorkaround(m)
         m.exec_(QCursor.pos())
 
-    def _addMenuItems(self, m, rows) -> None:
+    def _addMenuItems(self, m: QMenu, rows: Sequence) -> None:
         for row in rows:
             if not row:
                 m.addSeparator()
@@ -780,64 +782,86 @@ time = %(time)d;
     def onOptions(self) -> None:
         self.mw.onDeckConf(self.mw.col.decks.get(self.card.odid or self.card.did))
 
-    def setFlag(self, flag: int) -> None:
+    def set_flag_on_current_card(self, flag: int) -> None:
         # need to toggle off?
-        if self.card.userFlag() == flag:
+        if self.card.user_flag() == flag:
             flag = 0
-        self.card.setUserFlag(flag)
-        self.card.flush()
-        self._drawFlag()
+        self.card.set_user_flag(flag)
+        self.mw.col.update_card(self.card)
+        self.mw.update_undo_actions()
+        self._update_flag_icon()
 
-    def onMark(self) -> None:
-        f = self.card.note()
-        if f.hasTag("marked"):
-            f.delTag("marked")
+    def toggle_mark_on_current_note(self) -> None:
+        note = self.card.note()
+        if note.has_tag("marked"):
+            note.remove_tag("marked")
         else:
-            f.addTag("marked")
-        f.flush()
-        self._drawMark()
+            note.add_tag("marked")
+        self.mw.col.update_note(note)
+        self.mw.update_undo_actions()
+        self._update_mark_icon()
 
-    def onSuspend(self) -> None:
-        self.mw.checkpoint(tr(TR.STUDYING_SUSPEND))
+    def on_set_due(self) -> None:
+        if self.mw.state != "review" or not self.card:
+            return
+
+        set_due_date_dialog(
+            mw=self.mw,
+            parent=self.mw,
+            card_ids=[self.card.id],
+            default_key=Config.String.SET_DUE_REVIEWER,
+            on_done=self.mw.reset,
+        )
+
+    def suspend_current_note(self) -> None:
         self.mw.col.sched.suspend_cards([c.id for c in self.card.note().cards()])
+        self.mw.reset()
         tooltip(tr(TR.STUDYING_NOTE_SUSPENDED))
-        self.mw.reset()
 
-    def onSuspendCard(self) -> None:
-        self.mw.checkpoint(tr(TR.STUDYING_SUSPEND))
+    def suspend_current_card(self) -> None:
         self.mw.col.sched.suspend_cards([self.card.id])
-        tooltip(tr(TR.STUDYING_CARD_SUSPENDED))
         self.mw.reset()
+        tooltip(tr(TR.STUDYING_CARD_SUSPENDED))
 
-    def onDelete(self) -> None:
+    def bury_current_card(self) -> None:
+        self.mw.col.sched.bury_cards([self.card.id])
+        self.mw.reset()
+        tooltip(tr(TR.STUDYING_CARD_BURIED))
+
+    def bury_current_note(self) -> None:
+        self.mw.col.sched.bury_note(self.card.note())
+        self.mw.reset()
+        tooltip(tr(TR.STUDYING_NOTE_BURIED))
+
+    def delete_current_note(self) -> None:
         # need to check state because the shortcut is global to the main
         # window
         if self.mw.state != "review" or not self.card:
             return
-        self.mw.checkpoint(tr(TR.ACTIONS_DELETE))
         cnt = len(self.card.note().cards())
         self.mw.col.remove_notes([self.card.note().id])
         self.mw.reset()
         tooltip(tr(TR.STUDYING_NOTE_AND_ITS_CARD_DELETED, count=cnt))
 
-    def onBuryCard(self) -> None:
-        self.mw.checkpoint(tr(TR.STUDYING_BURY))
-        self.mw.col.sched.bury_cards([self.card.id])
-        self.mw.reset()
-        tooltip(tr(TR.STUDYING_CARD_BURIED))
-
-    def onBuryNote(self) -> None:
-        self.mw.checkpoint(tr(TR.STUDYING_BURY))
-        self.mw.col.sched.bury_note(self.card.note())
-        self.mw.reset()
-        tooltip(tr(TR.STUDYING_NOTE_BURIED))
-
     def onRecordVoice(self) -> None:
-        self._recordedAudio = getAudio(self.mw, encode=False)
-        self.onReplayRecorded()
+        def after_record(path: str) -> None:
+            self._recordedAudio = path
+            self.onReplayRecorded()
+
+        record_audio(self.mw, self.mw, False, after_record)
 
     def onReplayRecorded(self) -> None:
         if not self._recordedAudio:
             tooltip(tr(TR.STUDYING_YOU_HAVENT_RECORDED_YOUR_VOICE_YET))
             return
         av_player.play_file(self._recordedAudio)
+
+    # legacy
+
+    onBuryCard = bury_current_card
+    onBuryNote = bury_current_note
+    onSuspend = suspend_current_note
+    onSuspendCard = suspend_current_card
+    onDelete = delete_current_note
+    onMark = toggle_mark_on_current_note
+    setFlag = set_flag_on_current_card

@@ -22,45 +22,26 @@ def register_repos():
         ],
     )
 
-    # protobuf
-    ############
-
-    maybe(
-        http_archive,
-        name = "com_google_protobuf",
-        sha256 = "465fd9367992a9b9c4fba34a549773735da200903678b81b25f367982e8df376",
-        strip_prefix = "protobuf-3.13.0",
-        urls = [
-            "https://github.com/protocolbuffers/protobuf/releases/download/v3.13.0/protobuf-all-3.13.0.tar.gz",
-        ],
-    )
-
     # rust
     ########
-
-    maybe(
-        git_repository,
-        name = "io_bazel_rules_rust",
-        commit = "b610a69466c12bd3740398f1bf0c766df6951eff",
-        remote = "https://github.com/ankitects/rules_rust",
-        shallow_since = "1606797881 +1000",
-    )
 
     # native.local_repository(
     #     name = "io_bazel_rules_rust",
     #     path = "../rules_rust",
     # )
 
+    maybe(
+        http_archive,
+        name = "io_bazel_rules_rust",
+        strip_prefix = "rules_rust-anki-2020-12-10",
+        urls = [
+            "https://github.com/ankitects/rules_rust/archive/anki-2020-12-10.tar.gz",
+        ],
+        sha256 = "80a7647c3c1992c434a462bf424b9138c3c9af6c794ac112f636ca7c8c53180e",
+    )
+
     # python
     ##########
-
-    maybe(
-        git_repository,
-        name = "rules_python",
-        commit = "3927c9bce90f629eb5ab08bbc99a3d3bda1d95c0",
-        remote = "https://github.com/ankitects/rules_python",
-        shallow_since = "1604408056 +1000",
-    )
 
     # native.local_repository(
     #     name = "rules_python",
@@ -68,11 +49,13 @@ def register_repos():
     # )
 
     maybe(
-        git_repository,
-        name = "com_github_ali5h_rules_pip",
-        commit = "73953e06fdacb565f224c66f0683a7d8d0ede223",
-        remote = "https://github.com/ankitects/rules_pip",
-        shallow_since = "1606453171 +1000",
+        http_archive,
+        name = "rules_python",
+        strip_prefix = "rules_python-anki-2020-11-04",
+        urls = [
+            "https://github.com/ankitects/rules_python/archive/anki-2020-11-04.tar.gz",
+        ],
+        sha256 = "00e444dc3872a87838c2cb0cf50a15d92ca669385b72998f796d2fd6814356a3",
     )
 
     # native.local_repository(
@@ -80,61 +63,81 @@ def register_repos():
     #     path = "../rules_pip",
     # )
 
-    # javascript
-    ##############
-
     maybe(
         http_archive,
-        name = "build_bazel_rules_nodejs",
-        sha256 = "cd6c9880292fc83f1fd16ba33000974544b0fe0fccf3d5e15b2e3071ba011266",
-        urls = ["https://github.com/ankitects/rules_nodejs/releases/download/runfiles-fix-release/release.tar.gz"],
+        name = "com_github_ali5h_rules_pip",
+        strip_prefix = "rules_pip-anki-2020-11-30",
+        urls = [
+            "https://github.com/ankitects/rules_pip/archive/anki-2020-11-30.tar.gz",
+        ],
+        sha256 = "ab4f10967eb87985383a4172d4533dde568b3ff502aa550239eeccead249325b",
     )
+
+    # javascript
+    ##############
 
     # maybe(
     #     http_archive,
     #     name = "build_bazel_rules_nodejs",
-    #     #        sha256 = "64a71a64ac58b8969bb19b1c9258a973b6433913e958964da698943fb5521d98",
     #     urls = [
     #         "file:///c:/anki/release.tar.gz",
     #         "file:///Users/dae/Work/code/dtop/release.tar.gz",
     #     ],
     # )
 
+    maybe(
+        http_archive,
+        name = "build_bazel_rules_nodejs",
+        sha256 = "6142e9586162b179fdd570a55e50d1332e7d9c030efd853453438d607569721d",
+        urls = ["https://github.com/bazelbuild/rules_nodejs/releases/download/3.0.0/rules_nodejs-3.0.0.tar.gz"],
+    )
+
     # sass
     ############
+
+    # native.local_repository(
+    #     name = "io_bazel_rules_sass",
+    #     path = "../rules_sass",
+    # )
 
     maybe(
         http_archive,
         name = "io_bazel_rules_sass",
-        sha256 = "6e60fc1cf0805af2cdcce727a5eed3f238fb4df41b35ce581c57996947c0202c",
-        strip_prefix = "rules_sass-1.26.12",
-        url = "https://github.com/bazelbuild/rules_sass/archive/1.26.12.zip",
+        strip_prefix = "rules_sass-anki-2020-12-23",
+        urls = [
+            "https://github.com/ankitects/rules_sass/archive/anki-2020-12-23.tar.gz",
+        ],
+        sha256 = "224ae14b8d2166b3ab4c5fa9b2ae1828f30620ac628dc152e6c0859c7853bb97",
     )
 
     # svelte
     ##########
-
-    maybe(
-        git_repository,
-        name = "build_bazel_rules_svelte",
-        commit = "c28cd9e5d251a0ce47c68a6a2a11b075f3df8899",
-        remote = "https://github.com/ankitects/rules_svelte",
-        shallow_since = "1603950453 +1000",
-    )
 
     # native.local_repository(
     #     name = "build_bazel_rules_svelte",
     #     path = "../rules_svelte",
     # )
 
+    maybe(
+        http_archive,
+        name = "build_bazel_rules_svelte",
+        strip_prefix = "rules_svelte-anki-2021-02-06",
+        urls = [
+            "https://github.com/ankitects/rules_svelte/archive/anki-2021-02-06.tar.gz",
+        ],
+        sha256 = "f77a96ae5a354f8c3c24045f3bee8521bfe56224292d4f71184a3382784640eb",
+    )
+
     # translations
     ################
 
-    core_i18n_commit = "8444a0cb5c4bc9c504f83f68810b4a73b428e244"
-    core_i18n_shallow_since = "1606623876 +0000"
+    core_i18n_repo = "anki-core-i18n"
+    core_i18n_commit = "08132e398863b7c57ac3345c34c96db7f346a385"
+    core_i18n_zip_csum = "24ed30d44bd277f0b19080084cb2bc5bf2cd8f6e691362928e7cb96f33ffda4c"
 
-    qtftl_i18n_commit = "e7e257678b82c5636ad6042e39cd8a8adc67dfc2"
-    qtftl_i18n_shallow_since = "1606623844 +0000"
+    qtftl_i18n_repo = "anki-desktop-ftl"
+    qtftl_i18n_commit = "3668fb523ffa8162d5de878e6037f6cf9a98f97d"
+    qtftl_i18n_zip_csum = "2cb5b89d125edd1d3a6d7349b8aa2f1dc3a0a007aaf3d1f4ca08ea353e6676ee"
 
     i18n_build_content = """
 filegroup(
@@ -146,19 +149,29 @@ exports_files(["l10n.toml"])
 """
 
     maybe(
-        new_git_repository,
+        http_archive,
         name = "rslib_ftl",
         build_file_content = i18n_build_content,
-        commit = core_i18n_commit,
-        shallow_since = core_i18n_shallow_since,
-        remote = "https://github.com/ankitects/anki-core-i18n",
+        strip_prefix = core_i18n_repo + "-" + core_i18n_commit,
+        urls = [
+            "https://github.com/ankitects/{}/archive/{}.zip".format(
+                core_i18n_repo,
+                core_i18n_commit,
+            ),
+        ],
+        sha256 = core_i18n_zip_csum,
     )
 
     maybe(
-        new_git_repository,
+        http_archive,
         name = "extra_ftl",
         build_file_content = i18n_build_content,
-        commit = qtftl_i18n_commit,
-        shallow_since = qtftl_i18n_shallow_since,
-        remote = "https://github.com/ankitects/anki-desktop-ftl",
+        strip_prefix = qtftl_i18n_repo + "-" + qtftl_i18n_commit,
+        urls = [
+            "https://github.com/ankitects/{}/archive/{}.zip".format(
+                qtftl_i18n_repo,
+                qtftl_i18n_commit,
+            ),
+        ],
+        sha256 = qtftl_i18n_zip_csum,
     )

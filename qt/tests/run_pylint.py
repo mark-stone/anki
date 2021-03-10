@@ -1,25 +1,22 @@
+import multiprocessing
 import os
 import subprocess
 import sys
 
-import PyQt5.QtCore
+import PyQt5
+from pylint.lint import Run
 
 if __name__ == "__main__":
     (module, ini) = sys.argv[1:]
     ini = os.path.abspath(ini)
 
-    sys.exit(
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pylint",
-                "qt/aqt/qt.py",
-                "--rcfile",
-                ini,
-                "--extension-pkg-whitelist=PyQt5",
-                "-v",
-            ],
-            check=False,
-        ).returncode
+    Run(
+        [
+            "qt/aqt",
+            "--rcfile",
+            ini,
+            "-j",
+            str(min(4, multiprocessing.cpu_count())),
+            "-v",
+        ]
     )

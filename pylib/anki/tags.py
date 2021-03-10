@@ -13,92 +13,99 @@ from __future__ import annotations
 
 import pprint
 import re
-from typing import Collection, List, Optional, Tuple
+from typing import Collection, List, Match, Optional, Sequence
 
 import anki  # pylint: disable=unused-import
+import anki._backend.backend_pb2 as _pb
+import anki.collection
 from anki.utils import ids2str
+
+# public exports
+TagTreeNode = _pb.TagTreeNode
 
 
 class TagManager:
     def __init__(self, col: anki.collection.Collection) -> None:
         self.col = col.weakref()
 
-    # all tags
+    # legacy add-on code expects a List return type
     def all(self) -> List[str]:
-        return [t.tag for t in self.col.backend.all_tags()]
+        return list(self.col._backend.all_tags())
 
     def __repr__(self) -> str:
         d = dict(self.__dict__)
         del d["col"]
         return f"{super().__repr__()} {pprint.pformat(d, width=300)}"
 
-    # # List of (tag, usn)
-    def allItems(self) -> List[Tuple[str, int]]:
-        return [(t.tag, t.usn) for t in self.col.backend.all_tags()]
+    def tree(self) -> TagTreeNode:
+        return self.col._backend.tag_tree()
 
     # Registering and fetching tags
     #############################################################
 
     def register(
-        self, tags: Collection[str], usn: Optional[int] = None, clear=False
+        self, tags: Collection[str], usn: Optional[int] = None, clear: bool = False
     ) -> None:
-        if usn is None:
-            preserve_usn = False
-            usn_ = 0
-        else:
-            usn_ = usn
-            preserve_usn = True
-
-        self.col.backend.register_tags(
-            tags=" ".join(tags), preserve_usn=preserve_usn, usn=usn_, clear_first=clear
-        )
+        print("tags.register() is deprecated and no longer works")
 
     def registerNotes(self, nids: Optional[List[int]] = None) -> None:
-        "Add any missing tags from notes to the tags list."
-        # when called without an argument, the old list is cleared first.
-        if nids:
-            lim = " where id in " + ids2str(nids)
-            clear = False
-        else:
-            lim = ""
-            clear = True
-        self.register(
-            set(
-                self.split(
-                    " ".join(self.col.db.list("select distinct tags from notes" + lim))
-                )
-            ),
-            clear=clear,
-        )
+        "Clear unused tags and add any missing tags from notes to the tag list."
+        self.clear_unused_tags()
 
-    def byDeck(self, did, children=False) -> List[str]:
+    def clear_unused_tags(self) -> None:
+        self.col._backend.clear_unused_tags()
+
+    def byDeck(self, did: int, children: bool = False) -> List[str]:
         basequery = "select n.tags from cards c, notes n WHERE c.nid = n.id"
         if not children:
-            query = basequery + " AND c.did=?"
+            query = f"{basequery} AND c.did=?"
             res = self.col.db.list(query, did)
             return list(set(self.split(" ".join(res))))
         dids = [did]
         for name, id in self.col.decks.children(did):
             dids.append(id)
-        query = basequery + " AND c.did IN " + ids2str(dids)
+        query = f"{basequery} AND c.did IN {ids2str(dids)}"
         res = self.col.db.list(query)
         return list(set(self.split(" ".join(res))))
+
+    def set_expanded(self, tag: str, expanded: bool) -> None:
+        "Set browser expansion state for tag, registering the tag if missing."
+        self.col._backend.set_tag_expanded(name=tag, expanded=expanded)
 
     # Bulk addition/removal from notes
     #############################################################
 
     def bulk_add(self, nids: List[int], tags: str) -> int:
         """Add space-separate tags to provided notes, returning changed count."""
-        return self.col.backend.add_note_tags(nids=nids, tags=tags)
+        return self.col._backend.add_note_tags(nids=nids, tags=tags)
 
     def bulk_update(
-        self, nids: List[int], tags: str, replacement: str, regex: bool
+        self, nids: Sequence[int], tags: str, replacement: str, regex: bool
     ) -> int:
         """Replace space-separated tags, returning changed count.
         Tags replaced with an empty string will be removed."""
-        return self.col.backend.update_note_tags(
+        return self.col._backend.update_note_tags(
             nids=nids, tags=tags, replacement=replacement, regex=regex
         )
+
+    def bulk_remove(self, nids: Sequence[int], tags: str) -> int:
+        return self.bulk_update(nids, tags, "", False)
+
+    def rename(self, old: str, new: str) -> int:
+        "Rename provided tag, returning number of changed notes."
+        nids = self.col.find_notes(anki.collection.SearchNode(tag=old))
+        if not nids:
+            return 0
+        escaped_name = re.sub(r"[*_\\]", r"\\\g<0>", old)
+        return self.bulk_update(nids, escaped_name, new, False)
+
+    def remove(self, tag: str) -> None:
+        self.col._backend.clear_tag(tag)
+
+    def drag_drop(self, source_tags: List[str], target_tag: str) -> None:
+        """Rename one or more source tags that were dropped on `target_tag`.
+        If target_tag is "", tags will be placed at the top level."""
+        self.col._backend.drag_drop_tags(source_tags=source_tags, target_tag=target_tag)
 
     # legacy routines
 
@@ -123,7 +130,7 @@ class TagManager:
         "Join tags into a single string, with leading and trailing spaces."
         if not tags:
             return ""
-        return " %s " % " ".join(tags)
+        return f" {' '.join(tags)} "
 
     def addToStr(self, addtags: str, tags: str) -> str:
         "Add tags if they don't exist, and canonify."
@@ -136,9 +143,9 @@ class TagManager:
     def remFromStr(self, deltags: str, tags: str) -> str:
         "Delete tags if they exist."
 
-        def wildcard(pat, str):
+        def wildcard(pat: str, repl: str) -> Match:
             pat = re.escape(pat).replace("\\*", ".*")
-            return re.match("^" + pat + "$", str, re.IGNORECASE)
+            return re.match(f"^{pat}$", repl, re.IGNORECASE)
 
         currentTags = self.split(tags)
         for tag in self.split(deltags):

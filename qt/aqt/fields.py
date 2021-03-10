@@ -1,19 +1,33 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from concurrent.futures import Future
+
 import aqt
 from anki.consts import *
+from anki.errors import TemplateError
 from anki.lang import without_unicode_isolation
 from anki.models import NoteType
-from anki.rsbackend import TemplateError
 from aqt import AnkiQt, gui_hooks
 from aqt.qt import *
 from aqt.schema_change_tracker import ChangeTracker
-from aqt.utils import TR, askUser, getOnlyText, openHelp, showWarning, tooltip, tr
+from aqt.utils import (
+    TR,
+    HelpPage,
+    askUser,
+    disable_help_button,
+    getOnlyText,
+    openHelp,
+    showWarning,
+    tooltip,
+    tr,
+)
 
 
 class FieldDialog(QDialog):
-    def __init__(self, mw: AnkiQt, nt: NoteType, parent=None):
+    def __init__(
+        self, mw: AnkiQt, nt: NoteType, parent: Optional[QDialog] = None
+    ) -> None:
         QDialog.__init__(self, parent or mw)
         self.mw = mw
         self.col = self.mw.col
@@ -27,10 +41,11 @@ class FieldDialog(QDialog):
         self.setWindowTitle(
             without_unicode_isolation(tr(TR.FIELDS_FIELDS_FOR, val=self.model["name"]))
         )
+        disable_help_button(self)
         self.form.buttonBox.button(QDialogButtonBox.Help).setAutoDefault(False)
         self.form.buttonBox.button(QDialogButtonBox.Cancel).setAutoDefault(False)
         self.form.buttonBox.button(QDialogButtonBox.Save).setAutoDefault(False)
-        self.currentIdx = None
+        self.currentIdx: Optional[int] = None
         self.oldSortField = self.model["sortf"]
         self.fillFields()
         self.setupSignals()
@@ -41,13 +56,13 @@ class FieldDialog(QDialog):
 
     ##########################################################################
 
-    def fillFields(self):
+    def fillFields(self) -> None:
         self.currentIdx = None
         self.form.fieldList.clear()
         for c, f in enumerate(self.model["flds"]):
-            self.form.fieldList.addItem("{}: {}".format(c + 1, f["name"]))
+            self.form.fieldList.addItem(f"{c + 1}: {f['name']}")
 
-    def setupSignals(self):
+    def setupSignals(self) -> None:
         f = self.form
         qconnect(f.fieldList.currentRowChanged, self.onRowChange)
         qconnect(f.fieldAdd.clicked, self.onAdd)
@@ -57,7 +72,7 @@ class FieldDialog(QDialog):
         qconnect(f.sortField.clicked, self.onSortField)
         qconnect(f.buttonBox.helpRequested, self.onHelp)
 
-    def onDrop(self, ev):
+    def onDrop(self, ev: QDropEvent) -> None:
         fieldList = self.form.fieldList
         indicatorPos = fieldList.dropIndicatorPosition()
         dropPos = fieldList.indexAt(ev.pos()).row()
@@ -75,25 +90,34 @@ class FieldDialog(QDialog):
             movePos -= 1
         self.moveField(movePos + 1)  # convert to 1 based.
 
-    def onRowChange(self, idx):
+    def onRowChange(self, idx: int) -> None:
         if idx == -1:
             return
         self.saveField()
         self.loadField(idx)
 
-    def _uniqueName(self, prompt, ignoreOrd=None, old=""):
-        txt = getOnlyText(prompt, default=old).replace('"', "")
+    def _uniqueName(
+        self, prompt: str, ignoreOrd: Optional[int] = None, old: str = ""
+    ) -> Optional[str]:
+        txt = getOnlyText(prompt, default=old).replace('"', "").strip()
         if not txt:
-            return
+            return None
+        if txt[0] in "#^/":
+            showWarning(tr(TR.FIELDS_NAME_FIRST_LETTER_NOT_VALID))
+            return None
+        for letter in """:{"}""":
+            if letter in txt:
+                showWarning(tr(TR.FIELDS_NAME_INVALID_LETTER))
+                return None
         for f in self.model["flds"]:
             if ignoreOrd is not None and f["ord"] == ignoreOrd:
                 continue
             if f["name"] == txt:
                 showWarning(tr(TR.FIELDS_THAT_FIELD_NAME_IS_ALREADY_USED))
-                return
+                return None
         return txt
 
-    def onRename(self):
+    def onRename(self) -> None:
         idx = self.currentIdx
         f = self.model["flds"][idx]
         name = self._uniqueName(tr(TR.ACTIONS_NEW_NAME), self.currentIdx, f["name"])
@@ -109,7 +133,7 @@ class FieldDialog(QDialog):
         self.fillFields()
         self.form.fieldList.setCurrentRow(idx)
 
-    def onAdd(self):
+    def onAdd(self) -> None:
         name = self._uniqueName(tr(TR.FIELDS_FIELD_NAME))
         if not name:
             return
@@ -121,9 +145,10 @@ class FieldDialog(QDialog):
         self.fillFields()
         self.form.fieldList.setCurrentRow(len(self.model["flds"]) - 1)
 
-    def onDelete(self):
+    def onDelete(self) -> None:
         if len(self.model["flds"]) < 2:
-            return showWarning(tr(TR.FIELDS_NOTES_REQUIRE_AT_LEAST_ONE_FIELD))
+            showWarning(tr(TR.FIELDS_NOTES_REQUIRE_AT_LEAST_ONE_FIELD))
+            return
         count = self.mm.useCount(self.model)
         c = tr(TR.BROWSING_NOTE_COUNT, count=count)
         if not askUser(tr(TR.FIELDS_DELETE_FIELD_FROM, val=c)):
@@ -137,7 +162,7 @@ class FieldDialog(QDialog):
         self.fillFields()
         self.form.fieldList.setCurrentRow(0)
 
-    def onPosition(self, delta=-1):
+    def onPosition(self, delta: int = -1) -> None:
         idx = self.currentIdx
         l = len(self.model["flds"])
         txt = getOnlyText(tr(TR.FIELDS_NEW_POSITION_1, val=l), default=str(idx + 1))
@@ -151,23 +176,23 @@ class FieldDialog(QDialog):
             return
         self.moveField(pos)
 
-    def onSortField(self):
+    def onSortField(self) -> None:
         if not self.change_tracker.mark_schema():
-            return False
+            return
         # don't allow user to disable; it makes no sense
         self.form.sortField.setChecked(True)
         self.mm.set_sort_index(self.model, self.form.fieldList.currentRow())
 
-    def moveField(self, pos):
+    def moveField(self, pos: int) -> None:
         if not self.change_tracker.mark_schema():
-            return False
+            return
         self.saveField()
         f = self.model["flds"][self.currentIdx]
         self.mm.reposition_field(self.model, f, pos - 1)
         self.fillFields()
         self.form.fieldList.setCurrentRow(pos - 1)
 
-    def loadField(self, idx):
+    def loadField(self, idx: int) -> None:
         self.currentIdx = idx
         fld = self.model["flds"][idx]
         f = self.form
@@ -177,7 +202,7 @@ class FieldDialog(QDialog):
         f.sortField.setChecked(self.model["sortf"] == fld["ord"])
         f.rtl.setChecked(fld["rtl"])
 
-    def saveField(self):
+    def saveField(self) -> None:
         # not initialized yet?
         if self.currentIdx is None:
             return
@@ -201,25 +226,25 @@ class FieldDialog(QDialog):
             fld["rtl"] = rtl
             self.change_tracker.mark_basic()
 
-    def reject(self):
+    def reject(self) -> None:
         if self.change_tracker.changed():
             if not askUser("Discard changes?"):
                 return
 
         QDialog.reject(self)
 
-    def accept(self):
+    def accept(self) -> None:
         self.saveField()
 
-        def save():
+        def save() -> None:
             self.mm.save(self.model)
 
-        def on_done(fut):
+        def on_done(fut: Future) -> None:
             try:
                 fut.result()
             except TemplateError as e:
                 # fixme: i18n
-                showWarning("Unable to save changes: " + str(e))
+                showWarning(f"Unable to save changes: {str(e)}")
                 return
             self.mw.reset()
             tooltip("Changes saved.", parent=self.mw)
@@ -227,5 +252,5 @@ class FieldDialog(QDialog):
 
         self.mw.taskman.with_progress(save, on_done, self)
 
-    def onHelp(self):
-        openHelp("editing?id=customizing-fields")
+    def onHelp(self) -> None:
+        openHelp(HelpPage.CUSTOMIZING_FIELDS)

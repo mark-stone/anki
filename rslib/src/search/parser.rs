@@ -3,7 +3,7 @@
 
 use crate::{
     decks::DeckID,
-    err::{AnkiError, Result},
+    err::{ParseError, Result, SearchErrorKind as FailKind},
     notetype::NoteTypeID,
 };
 use lazy_static::lazy_static;
@@ -11,95 +11,106 @@ use nom::{
     branch::alt,
     bytes::complete::{escaped, is_not, tag},
     character::complete::{anychar, char, none_of, one_of},
-    combinator::{all_consuming, map, map_res, verify},
-    sequence::{delimited, preceded, separated_pair},
-    {multi::many0, IResult},
+    combinator::{map, verify},
+    error::ErrorKind as NomErrorKind,
+    multi::many0,
+    sequence::{preceded, separated_pair},
 };
 use regex::{Captures, Regex};
-use std::{borrow::Cow, num};
 
-struct ParseError {}
+type IResult<'a, O> = std::result::Result<(&'a str, O), nom::Err<ParseError<'a>>>;
+type ParseResult<'a, O> = std::result::Result<O, nom::Err<ParseError<'a>>>;
 
-impl From<num::ParseIntError> for ParseError {
-    fn from(_: num::ParseIntError) -> Self {
-        ParseError {}
-    }
+fn parse_failure(input: &str, kind: FailKind) -> nom::Err<ParseError<'_>> {
+    nom::Err::Failure(ParseError::Anki(input, kind))
 }
 
-impl From<num::ParseFloatError> for ParseError {
-    fn from(_: num::ParseFloatError) -> Self {
-        ParseError {}
-    }
+fn parse_error(input: &str) -> nom::Err<ParseError<'_>> {
+    nom::Err::Error(ParseError::Anki(input, FailKind::Other(None)))
 }
 
-impl<I> From<nom::Err<(I, nom::error::ErrorKind)>> for ParseError {
-    fn from(_: nom::Err<(I, nom::error::ErrorKind)>) -> Self {
-        ParseError {}
-    }
-}
-
-type ParseResult<T> = std::result::Result<T, ParseError>;
-
-#[derive(Debug, PartialEq)]
-pub(super) enum Node<'a> {
+#[derive(Debug, PartialEq, Clone)]
+pub enum Node {
     And,
     Or,
-    Not(Box<Node<'a>>),
-    Group(Vec<Node<'a>>),
-    Search(SearchNode<'a>),
+    Not(Box<Node>),
+    Group(Vec<Node>),
+    Search(SearchNode),
 }
 
-#[derive(Debug, PartialEq)]
-pub(super) enum SearchNode<'a> {
+impl Node {
+    pub fn negated(self) -> Node {
+        if let Node::Not(inner) = self {
+            *inner
+        } else {
+            Node::Not(Box::new(self))
+        }
+    }
+
+    /// If we're a group, return the contained elements.
+    /// If we're a single node, return ourselves in an one-element vec.
+    pub fn into_node_list(self) -> Vec<Node> {
+        if let Node::Group(nodes) = self {
+            nodes
+        } else {
+            vec![self]
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum SearchNode {
     // text without a colon
-    UnqualifiedText(Cow<'a, str>),
+    UnqualifiedText(String),
     // foo:bar, where foo doesn't match a term below
     SingleField {
-        field: Cow<'a, str>,
-        text: Cow<'a, str>,
+        field: String,
+        text: String,
         is_re: bool,
     },
     AddedInDays(u32),
     EditedInDays(u32),
-    CardTemplate(TemplateKind<'a>),
-    Deck(Cow<'a, str>),
+    CardTemplate(TemplateKind),
+    Deck(String),
     DeckID(DeckID),
     NoteTypeID(NoteTypeID),
-    NoteType(Cow<'a, str>),
+    NoteType(String),
     Rated {
         days: u32,
-        ease: Option<u8>,
+        ease: RatingKind,
     },
-    Tag(Cow<'a, str>),
+    Tag(String),
     Duplicates {
         note_type_id: NoteTypeID,
-        text: Cow<'a, str>,
+        text: String,
     },
     State(StateKind),
     Flag(u8),
-    NoteIDs(&'a str),
-    CardIDs(&'a str),
+    NoteIDs(String),
+    CardIDs(String),
     Property {
         operator: String,
         kind: PropertyKind,
     },
     WholeCollection,
-    Regex(Cow<'a, str>),
-    NoCombining(Cow<'a, str>),
-    WordBoundary(Cow<'a, str>),
+    Regex(String),
+    NoCombining(String),
+    WordBoundary(String),
 }
 
-#[derive(Debug, PartialEq)]
-pub(super) enum PropertyKind {
+#[derive(Debug, PartialEq, Clone)]
+pub enum PropertyKind {
     Due(i32),
     Interval(u32),
     Reps(u32),
     Lapses(u32),
     Ease(f32),
+    Position(u32),
+    Rated(i32, RatingKind),
 }
 
-#[derive(Debug, PartialEq)]
-pub(super) enum StateKind {
+#[derive(Debug, PartialEq, Clone)]
+pub enum StateKind {
     New,
     Review,
     Learning,
@@ -110,33 +121,37 @@ pub(super) enum StateKind {
     Suspended,
 }
 
-#[derive(Debug, PartialEq)]
-pub(super) enum TemplateKind<'a> {
+#[derive(Debug, PartialEq, Clone)]
+pub enum TemplateKind {
     Ordinal(u16),
-    Name(Cow<'a, str>),
+    Name(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum RatingKind {
+    AnswerButton(u8),
+    AnyAnswerButton,
+    ManualReschedule,
 }
 
 /// Parse the input string into a list of nodes.
-pub(super) fn parse(input: &str) -> Result<Vec<Node>> {
+pub fn parse(input: &str) -> Result<Vec<Node>> {
     let input = input.trim();
     if input.is_empty() {
         return Ok(vec![Node::Search(SearchNode::WholeCollection)]);
     }
 
-    let (_, nodes) =
-        all_consuming(group_inner)(input).map_err(|_e| AnkiError::SearchError(None))?;
-    Ok(nodes)
+    match group_inner(input) {
+        Ok(("", nodes)) => Ok(nodes),
+        // unmatched ) is only char not consumed by any node parser
+        Ok((remaining, _)) => Err(parse_failure(remaining, FailKind::UnopenedGroup).into()),
+        Err(err) => Err(err.into()),
+    }
 }
 
-/// One or more nodes surrounded by brackets, eg (one OR two)
-fn group(s: &str) -> IResult<&str, Node> {
-    map(delimited(char('('), group_inner, char(')')), |nodes| {
-        Node::Group(nodes)
-    })(s)
-}
-
-/// One or more nodes inside brackets, er 'one OR two -three'
-fn group_inner(input: &str) -> IResult<&str, Vec<Node>> {
+/// Zero or more nodes inside brackets, eg 'one OR two -three'.
+/// Empty vec must be handled by caller.
+fn group_inner(input: &str) -> IResult<Vec<Node>> {
     let mut remaining = input;
     let mut nodes = vec![];
 
@@ -148,8 +163,10 @@ fn group_inner(input: &str) -> IResult<&str, Vec<Node>> {
                 if nodes.len() % 2 == 0 {
                     // before adding the node, if the length is even then the node
                     // must not be a boolean
-                    if matches!(node, Node::And | Node::Or) {
-                        return Err(nom::Err::Failure(("", nom::error::ErrorKind::NoneOf)));
+                    if node == Node::And {
+                        return Err(parse_failure(input, FailKind::MisplacedAnd));
+                    } else if node == Node::Or {
+                        return Err(parse_failure(input, FailKind::MisplacedOr));
                     }
                 } else {
                     // if the length is odd, the next item must be a boolean. if it's
@@ -167,42 +184,133 @@ fn group_inner(input: &str) -> IResult<&str, Vec<Node>> {
         };
     }
 
-    if nodes.is_empty() {
-        Err(nom::Err::Error((remaining, nom::error::ErrorKind::Many1)))
-    } else if matches!(nodes.last().unwrap(), Node::And | Node::Or) {
-        // no trailing and/or
-        Err(nom::Err::Failure(("", nom::error::ErrorKind::NoneOf)))
-    } else {
-        // chomp any trailing whitespace
-        let (remaining, _) = whitespace0(remaining)?;
-
-        Ok((remaining, nodes))
+    if let Some(last) = nodes.last() {
+        match last {
+            Node::And => return Err(parse_failure(input, FailKind::MisplacedAnd)),
+            Node::Or => return Err(parse_failure(input, FailKind::MisplacedOr)),
+            _ => (),
+        }
     }
+    let (remaining, _) = whitespace0(remaining)?;
+
+    Ok((remaining, nodes))
 }
 
-fn whitespace0(s: &str) -> IResult<&str, Vec<char>> {
+fn whitespace0(s: &str) -> IResult<Vec<char>> {
     many0(one_of(" \u{3000}"))(s)
 }
 
 /// Optional leading space, then a (negated) group or text
-fn node(s: &str) -> IResult<&str, Node> {
+fn node(s: &str) -> IResult<Node> {
     preceded(whitespace0, alt((negated_node, group, text)))(s)
 }
 
-fn negated_node(s: &str) -> IResult<&str, Node> {
+fn negated_node(s: &str) -> IResult<Node> {
     map(preceded(char('-'), alt((group, text))), |node| {
         Node::Not(Box::new(node))
     })(s)
 }
 
+/// One or more nodes surrounded by brackets, eg (one OR two)
+fn group(s: &str) -> IResult<Node> {
+    let (opened, _) = char('(')(s)?;
+    let (tail, inner) = group_inner(opened)?;
+    if let Some(remaining) = tail.strip_prefix(')') {
+        if inner.is_empty() {
+            Err(parse_failure(s, FailKind::EmptyGroup))
+        } else {
+            Ok((remaining, Node::Group(inner)))
+        }
+    } else {
+        Err(parse_failure(s, FailKind::UnclosedGroup))
+    }
+}
+
 /// Either quoted or unquoted text
-fn text(s: &str) -> IResult<&str, Node> {
+fn text(s: &str) -> IResult<Node> {
     alt((quoted_term, partially_quoted_term, unquoted_term))(s)
 }
 
+/// Quoted text, including the outer double quotes.
+fn quoted_term(s: &str) -> IResult<Node> {
+    let (remaining, term) = quoted_term_str(s)?;
+    Ok((remaining, Node::Search(search_node_for_text(term)?)))
+}
+
+/// eg deck:"foo bar" - quotes must come after the :
+fn partially_quoted_term(s: &str) -> IResult<Node> {
+    let (remaining, (key, val)) = separated_pair(
+        escaped(is_not("\"(): \u{3000}\\"), '\\', none_of(" \u{3000}")),
+        char(':'),
+        quoted_term_str,
+    )(s)?;
+    Ok((
+        remaining,
+        Node::Search(search_node_for_text_with_argument(key, val)?),
+    ))
+}
+
+/// Unquoted text, terminated by whitespace or unescaped ", ( or )
+fn unquoted_term(s: &str) -> IResult<Node> {
+    match escaped(is_not("\"() \u{3000}\\"), '\\', none_of(" \u{3000}"))(s) {
+        Ok((tail, term)) => {
+            if term.is_empty() {
+                Err(parse_error(s))
+            } else if term.eq_ignore_ascii_case("and") {
+                Ok((tail, Node::And))
+            } else if term.eq_ignore_ascii_case("or") {
+                Ok((tail, Node::Or))
+            } else {
+                Ok((tail, Node::Search(search_node_for_text(term)?)))
+            }
+        }
+        Err(err) => {
+            if let nom::Err::Error((c, NomErrorKind::NoneOf)) = err {
+                Err(parse_failure(
+                    s,
+                    FailKind::UnknownEscape(format!("\\{}", c)),
+                ))
+            } else if "\"() \u{3000}".contains(s.chars().next().unwrap()) {
+                Err(parse_error(s))
+            } else {
+                // input ends in an odd number of backslashes
+                Err(parse_failure(s, FailKind::UnknownEscape('\\'.to_string())))
+            }
+        }
+    }
+}
+
+/// Non-empty string delimited by unescaped double quotes.
+fn quoted_term_str(s: &str) -> IResult<&str> {
+    let (opened, _) = char('"')(s)?;
+    if let Ok((tail, inner)) =
+        escaped::<_, ParseError, _, _, _, _>(is_not(r#""\"#), '\\', anychar)(opened)
+    {
+        if let Ok((remaining, _)) = char::<_, ParseError>('"')(tail) {
+            Ok((remaining, inner))
+        } else {
+            Err(parse_failure(s, FailKind::UnclosedQuote))
+        }
+    } else {
+        Err(parse_failure(
+            s,
+            match opened.chars().next().unwrap() {
+                '"' => FailKind::EmptyQuote,
+                // no unescaped " and a trailing \
+                _ => FailKind::UnclosedQuote,
+            },
+        ))
+    }
+}
+
 /// Determine if text is a qualified search, and handle escaped chars.
+/// Expect well-formed input: unempty and no trailing \.
 fn search_node_for_text(s: &str) -> ParseResult<SearchNode> {
-    let (tail, head) = escaped(is_not(r":\"), '\\', anychar)(s)?;
+    // leading : is only possible error for well-formed input
+    let (tail, head) = verify(escaped(is_not(r":\"), '\\', anychar), |t: &str| {
+        !t.is_empty()
+    })(s)
+    .map_err(|_: nom::Err<ParseError>| parse_failure(s, FailKind::MissingKey))?;
     if tail.is_empty() {
         Ok(SearchNode::UnqualifiedText(unescape(head)?))
     } else {
@@ -210,105 +318,226 @@ fn search_node_for_text(s: &str) -> ParseResult<SearchNode> {
     }
 }
 
-/// Unquoted text, terminated by whitespace or unescaped ", ( or )
-fn unquoted_term(s: &str) -> IResult<&str, Node> {
-    map_res(
-        verify(
-            escaped(is_not("\"() \u{3000}\\"), '\\', none_of(" \u{3000}")),
-            |s: &str| !s.is_empty(),
-        ),
-        |text: &str| -> ParseResult<Node> {
-            Ok(if text.eq_ignore_ascii_case("or") {
-                Node::Or
-            } else if text.eq_ignore_ascii_case("and") {
-                Node::And
-            } else {
-                Node::Search(search_node_for_text(text)?)
-            })
-        },
-    )(s)
-}
-
-/// Quoted text, including the outer double quotes.
-fn quoted_term(s: &str) -> IResult<&str, Node> {
-    map_res(quoted_term_str, |o| -> ParseResult<Node> {
-        Ok(Node::Search(search_node_for_text(o)?))
-    })(s)
-}
-
-fn quoted_term_str(s: &str) -> IResult<&str, &str> {
-    delimited(char('"'), quoted_term_inner, char('"'))(s)
-}
-
-/// Quoted text, terminated by a non-escaped double quote
-fn quoted_term_inner(s: &str) -> IResult<&str, &str> {
-    verify(escaped(is_not(r#""\"#), '\\', anychar), |s: &str| {
-        !s.is_empty()
-    })(s)
-}
-
-/// eg deck:"foo bar" - quotes must come after the :
-fn partially_quoted_term(s: &str) -> IResult<&str, Node> {
-    map_res(
-        separated_pair(
-            verify(
-                escaped(is_not("\"(): \u{3000}\\"), '\\', none_of(": \u{3000}")),
-                |s: &str| !s.is_empty(),
-            ),
-            char(':'),
-            quoted_term_str,
-        ),
-        |p| match search_node_for_text_with_argument(p.0, p.1) {
-            Ok(search) => Ok(Node::Search(search)),
-            Err(e) => Err(e),
-        },
-    )(s)
-}
-
 /// Convert a colon-separated key/val pair into the relevant search type.
 fn search_node_for_text_with_argument<'a>(
     key: &'a str,
     val: &'a str,
-) -> ParseResult<SearchNode<'a>> {
+) -> ParseResult<'a, SearchNode> {
     Ok(match key.to_ascii_lowercase().as_str() {
-        "added" => SearchNode::AddedInDays(val.parse()?),
-        "edited" => SearchNode::EditedInDays(val.parse()?),
         "deck" => SearchNode::Deck(unescape(val)?),
         "note" => SearchNode::NoteType(unescape(val)?),
         "tag" => SearchNode::Tag(unescape(val)?),
-        "mid" => SearchNode::NoteTypeID(val.parse()?),
-        "nid" => SearchNode::NoteIDs(check_id_list(val)?),
-        "cid" => SearchNode::CardIDs(check_id_list(val)?),
-        "did" => SearchNode::DeckID(val.parse()?),
         "card" => parse_template(val)?,
-        "is" => parse_state(val)?,
         "flag" => parse_flag(val)?,
-        "rated" => parse_rated(val)?,
-        "dupe" => parse_dupes(val)?,
+        "resched" => parse_resched(val)?,
         "prop" => parse_prop(val)?,
+        "added" => parse_added(val)?,
+        "edited" => parse_edited(val)?,
+        "rated" => parse_rated(val)?,
+        "is" => parse_state(val)?,
+        "did" => parse_did(val)?,
+        "mid" => parse_mid(val)?,
+        "nid" => SearchNode::NoteIDs(check_id_list(val, key)?.into()),
+        "cid" => SearchNode::CardIDs(check_id_list(val, key)?.into()),
         "re" => SearchNode::Regex(unescape_quotes(val)),
         "nc" => SearchNode::NoCombining(unescape(val)?),
         "w" => SearchNode::WordBoundary(unescape(val)?),
+        "dupe" => parse_dupe(val)?,
         // anything else is a field search
         _ => parse_single_field(key, val)?,
     })
 }
 
-/// ensure a list of ids contains only numbers and commas, returning unchanged if true
-/// used by nid: and cid:
-fn check_id_list(s: &str) -> ParseResult<&str> {
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r"^(\d+,)*\d+$").unwrap();
-    }
-    if RE.is_match(s) {
-        Ok(s)
+fn parse_template(s: &str) -> ParseResult<SearchNode> {
+    Ok(SearchNode::CardTemplate(match s.parse::<u16>() {
+        Ok(n) => TemplateKind::Ordinal(n.max(1) - 1),
+        Err(_) => TemplateKind::Name(unescape(s)?),
+    }))
+}
+
+/// flag:0-4
+fn parse_flag(s: &str) -> ParseResult<SearchNode> {
+    if let Ok(flag) = s.parse::<u8>() {
+        if flag > 4 {
+            Err(parse_failure(s, FailKind::InvalidFlag))
+        } else {
+            Ok(SearchNode::Flag(flag))
+        }
     } else {
-        Err(ParseError {})
+        Err(parse_failure(s, FailKind::InvalidFlag))
     }
 }
 
+/// eg resched:3
+fn parse_resched(s: &str) -> ParseResult<SearchNode> {
+    parse_u32(s, "resched:").map(|days| SearchNode::Rated {
+        days,
+        ease: RatingKind::ManualReschedule,
+    })
+}
+
+/// eg prop:ivl>3, prop:ease!=2.5
+fn parse_prop(prop_clause: &str) -> ParseResult<SearchNode> {
+    let (tail, prop) = alt::<_, _, ParseError, _>((
+        tag("ivl"),
+        tag("due"),
+        tag("reps"),
+        tag("lapses"),
+        tag("ease"),
+        tag("pos"),
+        tag("rated"),
+        tag("resched"),
+    ))(prop_clause)
+    .map_err(|_| {
+        parse_failure(
+            prop_clause,
+            FailKind::InvalidPropProperty(prop_clause.into()),
+        )
+    })?;
+
+    let (num, operator) = alt::<_, _, ParseError, _>((
+        tag("<="),
+        tag(">="),
+        tag("!="),
+        tag("="),
+        tag("<"),
+        tag(">"),
+    ))(tail)
+    .map_err(|_| parse_failure(prop_clause, FailKind::InvalidPropOperator(prop.to_string())))?;
+
+    let kind = match prop {
+        "ease" => PropertyKind::Ease(parse_f32(num, prop_clause)?),
+        "due" => PropertyKind::Due(parse_i32(num, prop_clause)?),
+        "rated" => parse_prop_rated(num, prop_clause)?,
+        "resched" => PropertyKind::Rated(
+            parse_negative_i32(num, prop_clause)?,
+            RatingKind::ManualReschedule,
+        ),
+        "ivl" => PropertyKind::Interval(parse_u32(num, prop_clause)?),
+        "reps" => PropertyKind::Reps(parse_u32(num, prop_clause)?),
+        "lapses" => PropertyKind::Lapses(parse_u32(num, prop_clause)?),
+        "pos" => PropertyKind::Position(parse_u32(num, prop_clause)?),
+        _ => unreachable!(),
+    };
+
+    Ok(SearchNode::Property {
+        operator: operator.to_string(),
+        kind,
+    })
+}
+
+fn parse_u32<'a>(num: &str, context: &'a str) -> ParseResult<'a, u32> {
+    num.parse().map_err(|_e| {
+        parse_failure(
+            context,
+            FailKind::InvalidPositiveWholeNumber {
+                context: context.into(),
+                provided: num.into(),
+            },
+        )
+    })
+}
+
+fn parse_i32<'a>(num: &str, context: &'a str) -> ParseResult<'a, i32> {
+    num.parse().map_err(|_e| {
+        parse_failure(
+            context,
+            FailKind::InvalidWholeNumber {
+                context: context.into(),
+                provided: num.into(),
+            },
+        )
+    })
+}
+
+fn parse_negative_i32<'a>(num: &str, context: &'a str) -> ParseResult<'a, i32> {
+    num.parse()
+        .map_err(|_| ())
+        .and_then(|n| if n > 0 { Err(()) } else { Ok(n) })
+        .map_err(|_| {
+            parse_failure(
+                context,
+                FailKind::InvalidNegativeWholeNumber {
+                    context: context.into(),
+                    provided: num.into(),
+                },
+            )
+        })
+}
+
+fn parse_f32<'a>(num: &str, context: &'a str) -> ParseResult<'a, f32> {
+    num.parse().map_err(|_e| {
+        parse_failure(
+            context,
+            FailKind::InvalidNumber {
+                context: context.into(),
+                provided: num.into(),
+            },
+        )
+    })
+}
+
+fn parse_i64<'a>(num: &str, context: &'a str) -> ParseResult<'a, i64> {
+    num.parse().map_err(|_e| {
+        parse_failure(
+            context,
+            FailKind::InvalidWholeNumber {
+                context: context.into(),
+                provided: num.into(),
+            },
+        )
+    })
+}
+
+fn parse_answer_button<'a>(num: Option<&str>, context: &'a str) -> ParseResult<'a, RatingKind> {
+    Ok(if let Some(num) = num {
+        RatingKind::AnswerButton(
+            num.parse()
+                .map_err(|_| ())
+                .and_then(|n| if matches!(n, 1..=4) { Ok(n) } else { Err(()) })
+                .map_err(|_| {
+                    parse_failure(
+                        context,
+                        FailKind::InvalidAnswerButton {
+                            context: context.into(),
+                            provided: num.into(),
+                        },
+                    )
+                })?,
+        )
+    } else {
+        RatingKind::AnyAnswerButton
+    })
+}
+
+fn parse_prop_rated<'a>(num: &str, context: &'a str) -> ParseResult<'a, PropertyKind> {
+    let mut it = num.splitn(2, ':');
+    let days = parse_negative_i32(it.next().unwrap(), context)?;
+    let button = parse_answer_button(it.next(), context)?;
+    Ok(PropertyKind::Rated(days, button))
+}
+
+/// eg added:1
+fn parse_added(s: &str) -> ParseResult<SearchNode> {
+    parse_u32(s, "added:").map(|n| SearchNode::AddedInDays(n.max(1)))
+}
+
+/// eg edited:1
+fn parse_edited(s: &str) -> ParseResult<SearchNode> {
+    parse_u32(s, "edited:").map(|n| SearchNode::EditedInDays(n.max(1)))
+}
+
+/// eg rated:3 or rated:10:2
+/// second arg must be between 1-4
+fn parse_rated(s: &str) -> ParseResult<SearchNode> {
+    let mut it = s.splitn(2, ':');
+    let days = parse_u32(it.next().unwrap(), "rated:")?.max(1);
+    let button = parse_answer_button(it.next(), s)?;
+    Ok(SearchNode::Rated { days, ease: button })
+}
+
 /// eg is:due
-fn parse_state(s: &str) -> ParseResult<SearchNode<'static>> {
+fn parse_state(s: &str) -> ParseResult<SearchNode> {
     use StateKind::*;
     Ok(SearchNode::State(match s {
         "new" => New,
@@ -319,100 +548,57 @@ fn parse_state(s: &str) -> ParseResult<SearchNode<'static>> {
         "buried-manually" => UserBuried,
         "buried-sibling" => SchedBuried,
         "suspended" => Suspended,
-        _ => return Err(ParseError {}),
+        _ => return Err(parse_failure(s, FailKind::InvalidState(s.into()))),
     }))
 }
 
-/// flag:0-4
-fn parse_flag(s: &str) -> ParseResult<SearchNode<'static>> {
-    let n: u8 = s.parse()?;
-    if n > 4 {
-        Err(ParseError {})
+fn parse_did(s: &str) -> ParseResult<SearchNode> {
+    parse_i64(s, "did:").map(|n| SearchNode::DeckID(n.into()))
+}
+
+fn parse_mid(s: &str) -> ParseResult<SearchNode> {
+    parse_i64(s, "mid:").map(|n| SearchNode::NoteTypeID(n.into()))
+}
+
+/// ensure a list of ids contains only numbers and commas, returning unchanged if true
+/// used by nid: and cid:
+fn check_id_list<'a, 'b>(s: &'a str, context: &'b str) -> ParseResult<'a, &'a str> {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"^(\d+,)*\d+$").unwrap();
+    }
+    if RE.is_match(s) {
+        Ok(s)
     } else {
-        Ok(SearchNode::Flag(n))
+        Err(parse_failure(
+            s,
+            // id lists are undocumented, so no translation
+            FailKind::Other(Some(format!(
+                "expected only digits and commas in {}:",
+                context
+            ))),
+        ))
     }
 }
 
-/// eg rated:3 or rated:10:2
-/// second arg must be between 0-4
-fn parse_rated(val: &str) -> ParseResult<SearchNode<'static>> {
-    let mut it = val.splitn(2, ':');
-    let days = it.next().unwrap().parse()?;
-    let ease = match it.next() {
-        Some(v) => {
-            let n: u8 = v.parse()?;
-            if n < 5 {
-                Some(n)
-            } else {
-                return Err(ParseError {});
-            }
-        }
-        None => None,
-    };
-
-    Ok(SearchNode::Rated { days, ease })
-}
-
-/// eg dupes:1231,hello
-fn parse_dupes(val: &str) -> ParseResult<SearchNode> {
-    let mut it = val.splitn(2, ',');
-    let mid: NoteTypeID = it.next().unwrap().parse()?;
-    let text = it.next().ok_or(ParseError {})?;
-    Ok(SearchNode::Duplicates {
-        note_type_id: mid,
-        text: unescape_quotes(text),
-    })
-}
-
-/// eg prop:ivl>3, prop:ease!=2.5
-fn parse_prop(val: &str) -> ParseResult<SearchNode<'static>> {
-    let (val, key) = alt((
-        tag("ivl"),
-        tag("due"),
-        tag("reps"),
-        tag("lapses"),
-        tag("ease"),
-    ))(val)?;
-
-    let (val, operator) = alt((
-        tag("<="),
-        tag(">="),
-        tag("!="),
-        tag("="),
-        tag("<"),
-        tag(">"),
-    ))(val)?;
-
-    let kind = if key == "ease" {
-        let num: f32 = val.parse()?;
-        PropertyKind::Ease(num)
-    } else if key == "due" {
-        let num: i32 = val.parse()?;
-        PropertyKind::Due(num)
+/// eg dupe:1231,hello
+fn parse_dupe(s: &str) -> ParseResult<SearchNode> {
+    let mut it = s.splitn(2, ',');
+    let ntid = parse_i64(it.next().unwrap(), s)?;
+    if let Some(text) = it.next() {
+        Ok(SearchNode::Duplicates {
+            note_type_id: ntid.into(),
+            text: unescape_quotes_and_backslashes(text),
+        })
     } else {
-        let num: u32 = val.parse()?;
-        match key {
-            "ivl" => PropertyKind::Interval(num),
-            "reps" => PropertyKind::Reps(num),
-            "lapses" => PropertyKind::Lapses(num),
-            _ => unreachable!(),
-        }
-    };
-
-    Ok(SearchNode::Property {
-        operator: operator.to_string(),
-        kind,
-    })
+        // this is an undocumented keyword, so no translation/help
+        Err(parse_failure(
+            s,
+            FailKind::Other(Some("invalid 'dupe:' search".into())),
+        ))
+    }
 }
 
-fn parse_template(val: &str) -> ParseResult<SearchNode> {
-    Ok(SearchNode::CardTemplate(match val.parse::<u16>() {
-        Ok(n) => TemplateKind::Ordinal(n.max(1) - 1),
-        Err(_) => TemplateKind::Name(unescape(val)?),
-    }))
-}
-
-fn parse_single_field<'a>(key: &'a str, val: &'a str) -> ParseResult<SearchNode<'a>> {
+fn parse_single_field<'a>(key: &'a str, val: &'a str) -> ParseResult<'a, SearchNode> {
     Ok(if let Some(stripped) = val.strip_prefix("re:") {
         SearchNode::SingleField {
             field: unescape(key)?,
@@ -429,52 +615,65 @@ fn parse_single_field<'a>(key: &'a str, val: &'a str) -> ParseResult<SearchNode<
 }
 
 /// For strings without unescaped ", convert \" to "
-fn unescape_quotes(s: &str) -> Cow<str> {
+fn unescape_quotes(s: &str) -> String {
     if s.contains('"') {
-        s.replace(r#"\""#, "\"").into()
+        s.replace(r#"\""#, "\"")
+    } else {
+        s.into()
+    }
+}
+
+/// For non-globs like dupe text without any assumption about the content
+fn unescape_quotes_and_backslashes(s: &str) -> String {
+    if s.contains('"') || s.contains('\\') {
+        s.replace(r#"\""#, "\"").replace(r"\\", r"\")
     } else {
         s.into()
     }
 }
 
 /// Unescape chars with special meaning to the parser.
-fn unescape(txt: &str) -> ParseResult<Cow<str>> {
-    if is_invalid_escape(txt) {
-        Err(ParseError {})
-    } else if is_parser_escape(txt) {
-        lazy_static! {
-            static ref RE: Regex = Regex::new(r#"\\[\\":()-]"#).unwrap();
-        }
-        Ok(RE.replace_all(&txt, |caps: &Captures| match &caps[0] {
-            r"\\" => r"\\",
-            "\\\"" => "\"",
-            r"\:" => ":",
-            r"\(" => "(",
-            r"\)" => ")",
-            r"\-" => "-",
-            _ => unreachable!(),
-        }))
+fn unescape(txt: &str) -> ParseResult<String> {
+    if let Some(seq) = invalid_escape_sequence(txt) {
+        Err(parse_failure(txt, FailKind::UnknownEscape(seq)))
     } else {
-        Ok(txt.into())
+        Ok(if is_parser_escape(txt) {
+            lazy_static! {
+                static ref RE: Regex = Regex::new(r#"\\[\\":()-]"#).unwrap();
+            }
+            RE.replace_all(&txt, |caps: &Captures| match &caps[0] {
+                r"\\" => r"\\",
+                "\\\"" => "\"",
+                r"\:" => ":",
+                r"\(" => "(",
+                r"\)" => ")",
+                r"\-" => "-",
+                _ => unreachable!(),
+            })
+            .into()
+        } else {
+            txt.into()
+        })
     }
 }
 
-/// Check string for invalid escape sequences.
-fn is_invalid_escape(txt: &str) -> bool {
+/// Return invalid escape sequence if any.
+fn invalid_escape_sequence(txt: &str) -> Option<String> {
     // odd number of \s not followed by an escapable character
     lazy_static! {
         static ref RE: Regex = Regex::new(
             r#"(?x)
             (?:^|[^\\])         # not a backslash
             (?:\\\\)*           # even number of backslashes
-            \\                  # single backslash
-            (?:[^\\":*_()-]|$)  # anything but an escapable char
+            (\\                 # single backslash
+            (?:[^\\":*_()-]|$)) # anything but an escapable char
             "#
         )
         .unwrap();
     }
+    let caps = RE.captures(txt)?;
 
-    RE.is_match(txt)
+    Some(caps[1].to_string())
 }
 
 /// Check string for escape sequences handled by the parser: ":()-
@@ -497,6 +696,8 @@ fn is_parser_escape(txt: &str) -> bool {
 
 #[cfg(test)]
 mod test {
+    use crate::err::SearchErrorKind;
+
     use super::*;
 
     #[test]
@@ -506,11 +707,6 @@ mod test {
 
         assert_eq!(parse("")?, vec![Search(SearchNode::WholeCollection)]);
         assert_eq!(parse("  ")?, vec![Search(SearchNode::WholeCollection)]);
-
-        // leading/trailing boolean operators
-        assert!(parse("foo and").is_err());
-        assert!(parse("and foo").is_err());
-        assert!(parse("and").is_err());
 
         // leading/trailing/interspersed whitespace
         assert_eq!(
@@ -572,11 +768,6 @@ mod test {
         assert_eq!(parse(r#""field:va\"lue""#)?, parse(r#"field:"va\"lue""#)?,);
         assert_eq!(parse(r#""field:va\"lue""#)?, parse(r#"field:va\"lue"#)?,);
 
-        // only \":()-*_ are escapable
-        assert!(parse(r"\").is_err());
-        assert!(parse(r"\a").is_err());
-        assert!(parse(r"\%").is_err());
-
         // parser unescapes ":()-
         assert_eq!(
             parse(r#"\"\:\(\)\-"#)?,
@@ -591,11 +782,8 @@ mod test {
 
         // escaping parentheses is optional (only) inside quotes
         assert_eq!(parse(r#""\)\(""#), parse(r#"")(""#));
-        assert!(parse(")(").is_err());
 
         // escaping : is optional if it is preceded by another :
-        assert!(parse(":test").is_err());
-        assert!(parse(":").is_err());
         assert_eq!(parse("field:val:ue"), parse(r"field:val\:ue"));
         assert_eq!(parse(r#""field:val:ue""#), parse(r"field:val\:ue"));
         assert_eq!(parse(r#"field:"val:ue""#), parse(r"field:val\:ue"));
@@ -617,7 +805,6 @@ mod test {
             parse(r#"re:te\"st"#)?,
             vec![Search(Regex(r#"te"st"#.into()))]
         );
-        assert!(parse(r#"re:te"st"#).is_err());
 
         // spaces are optional if node separation is clear
         assert_eq!(parse(r#"a"b"(c)"#)?, parse("a b (c)")?);
@@ -648,11 +835,8 @@ mod test {
             parse("nid:1237123712,2,3")?,
             vec![Search(NoteIDs("1237123712,2,3".into()))]
         );
-        assert!(parse("nid:1237123712_2,3").is_err());
         assert_eq!(parse("is:due")?, vec![Search(State(StateKind::Due))]);
         assert_eq!(parse("flag:3")?, vec![Search(Flag(3))]);
-        assert!(parse("flag:-1").is_err());
-        assert!(parse("flag:5").is_err());
 
         assert_eq!(
             parse("prop:ivl>3")?,
@@ -661,7 +845,6 @@ mod test {
                 kind: PropertyKind::Interval(3)
             })]
         );
-        assert!(parse("prop:ivl>3.3").is_err());
         assert_eq!(
             parse("prop:ease<=3.3")?,
             vec![Search(Property {
@@ -671,5 +854,160 @@ mod test {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn errors() -> Result<()> {
+        use crate::err::AnkiError;
+        use FailKind::*;
+
+        fn assert_err_kind(input: &str, kind: FailKind) {
+            assert_eq!(parse(input), Err(AnkiError::SearchError(kind)));
+        }
+
+        fn failkind(input: &str) -> SearchErrorKind {
+            if let Err(AnkiError::SearchError(err)) = parse(input) {
+                err
+            } else {
+                panic!("expected search error");
+            }
+        }
+
+        assert_err_kind("foo and", MisplacedAnd);
+        assert_err_kind("and foo", MisplacedAnd);
+        assert_err_kind("and", MisplacedAnd);
+
+        assert_err_kind("foo or", MisplacedOr);
+        assert_err_kind("or foo", MisplacedOr);
+        assert_err_kind("or", MisplacedOr);
+
+        assert_err_kind("()", EmptyGroup);
+        assert_err_kind("( )", EmptyGroup);
+        assert_err_kind("(foo () bar)", EmptyGroup);
+
+        assert_err_kind(")", UnopenedGroup);
+        assert_err_kind("foo ) bar", UnopenedGroup);
+        assert_err_kind("(foo) bar)", UnopenedGroup);
+
+        assert_err_kind("(", UnclosedGroup);
+        assert_err_kind("foo ( bar", UnclosedGroup);
+        assert_err_kind("(foo (bar)", UnclosedGroup);
+
+        assert_err_kind(r#""""#, EmptyQuote);
+        assert_err_kind(r#"foo:"""#, EmptyQuote);
+
+        assert_err_kind(r#" " "#, UnclosedQuote);
+        assert_err_kind(r#"" foo"#, UnclosedQuote);
+        assert_err_kind(r#""\"#, UnclosedQuote);
+        assert_err_kind(r#"foo:"bar"#, UnclosedQuote);
+        assert_err_kind(r#"foo:"bar\"#, UnclosedQuote);
+
+        assert_err_kind(":", MissingKey);
+        assert_err_kind(":foo", MissingKey);
+        assert_err_kind(r#":"foo""#, MissingKey);
+
+        assert_err_kind(r"\", UnknownEscape(r"\".to_string()));
+        assert_err_kind(r"\%", UnknownEscape(r"\%".to_string()));
+        assert_err_kind(r"foo\", UnknownEscape(r"\".to_string()));
+        assert_err_kind(r"\foo", UnknownEscape(r"\f".to_string()));
+        assert_err_kind(r"\ ", UnknownEscape(r"\".to_string()));
+        assert_err_kind(r#""\ ""#, UnknownEscape(r"\ ".to_string()));
+
+        for term in &[
+            "nid:1_2,3",
+            "nid:1,2,x",
+            "nid:,2,3",
+            "nid:1,2,",
+            "cid:1_2,3",
+            "cid:1,2,x",
+            "cid:,2,3",
+            "cid:1,2,",
+        ] {
+            assert!(matches!(failkind(term), SearchErrorKind::Other(_)));
+        }
+
+        assert_err_kind("is:foo", InvalidState("foo".into()));
+        assert_err_kind("is:DUE", InvalidState("DUE".into()));
+        assert_err_kind("is:New", InvalidState("New".into()));
+        assert_err_kind("is:", InvalidState("".into()));
+        assert_err_kind(r#""is:learn ""#, InvalidState("learn ".into()));
+
+        assert_err_kind(r#""flag: ""#, InvalidFlag);
+        assert_err_kind("flag:-0", InvalidFlag);
+        assert_err_kind("flag:", InvalidFlag);
+        assert_err_kind("flag:5", InvalidFlag);
+        assert_err_kind("flag:1.1", InvalidFlag);
+
+        for term in &["added", "edited", "rated", "resched"] {
+            assert!(
+                matches!(failkind(&format!("{}:1.1", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
+            );
+            assert!(
+                matches!(failkind(&format!("{}:-1", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
+            );
+            assert!(
+                matches!(failkind(&format!("{}:", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
+            );
+            assert!(
+                matches!(failkind(&format!("{}:foo", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
+            );
+        }
+
+        assert!(matches!(failkind("rated:1:"), SearchErrorKind::InvalidAnswerButton { .. }));
+        assert!(matches!(failkind("rated:2:-1"), SearchErrorKind::InvalidAnswerButton { .. }));
+        assert!(matches!(failkind("rated:3:1.1"), SearchErrorKind::InvalidAnswerButton { .. }));
+        assert!(matches!(failkind("rated:0:foo"), SearchErrorKind::InvalidAnswerButton { .. }));
+
+        assert!(matches!(failkind("dupe:"), SearchErrorKind::InvalidWholeNumber { .. }));
+        assert!(matches!(failkind("dupe:1.1"), SearchErrorKind::InvalidWholeNumber { .. }));
+        assert!(matches!(failkind("dupe:foo"), SearchErrorKind::InvalidWholeNumber { .. }));
+
+        assert_err_kind("prop:", InvalidPropProperty("".into()));
+        assert_err_kind("prop:=1", InvalidPropProperty("=1".into()));
+        assert_err_kind("prop:DUE<5", InvalidPropProperty("DUE<5".into()));
+
+        assert_err_kind("prop:lapses", InvalidPropOperator("lapses".to_string()));
+        assert_err_kind("prop:pos~1", InvalidPropOperator("pos".to_string()));
+        assert_err_kind("prop:reps10", InvalidPropOperator("reps".to_string()));
+
+        // unsigned
+
+        for term in &["ivl", "reps", "lapses", "pos"] {
+            assert!(
+                matches!(failkind(&format!("prop:{}>", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
+            );
+            assert!(
+                matches!(failkind(&format!("prop:{}=0.5", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
+            );
+            assert!(
+                matches!(failkind(&format!("prop:{}!=-1", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
+            );
+            assert!(
+                matches!(failkind(&format!("prop:{}<foo", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
+            );
+        }
+
+        // signed
+
+        assert!(matches!(failkind("prop:due>"), SearchErrorKind::InvalidWholeNumber { .. }));
+        assert!(matches!(failkind("prop:due=0.5"), SearchErrorKind::InvalidWholeNumber { .. }));
+
+        // float
+
+        assert!(matches!(failkind("prop:ease>"), SearchErrorKind::InvalidNumber { .. }));
+        assert!(matches!(failkind("prop:ease!=one"), SearchErrorKind::InvalidNumber { .. }));
+        assert!(matches!(failkind("prop:ease<1,3"), SearchErrorKind::InvalidNumber { .. }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn negating() {
+        let node = Node::Search(SearchNode::UnqualifiedText("foo".to_string()));
+        let neg_node = Node::Not(Box::new(Node::Search(SearchNode::UnqualifiedText(
+            "foo".to_string(),
+        ))));
+        assert_eq!(node.clone().negated(), neg_node);
+        assert_eq!(node.clone().negated().negated(), node);
     }
 }

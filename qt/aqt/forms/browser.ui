@@ -91,7 +91,7 @@
           <property name="verticalSpacing">
            <number>0</number>
           </property>
-          <item row="0" column="1">
+          <item row="0" column="0">
            <widget class="QComboBox" name="searchEdit">
             <property name="sizePolicy">
              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
@@ -104,33 +104,6 @@
             </property>
             <property name="insertPolicy">
              <enum>QComboBox::NoInsert</enum>
-            </property>
-           </widget>
-          </item>
-          <item row="0" column="2">
-           <widget class="QPushButton" name="searchButton">
-            <property name="text">
-             <string>ACTIONS_SEARCH</string>
-            </property>
-           </widget>
-          </item>
-          <item row="0" column="3">
-           <widget class="QPushButton" name="previewButton">
-            <property name="text">
-             <string>ACTIONS_PREVIEW</string>
-            </property>
-            <property name="shortcut">
-             <string notr="true">Ctrl+Shift+P</string>
-            </property>
-            <property name="checkable">
-             <bool>true</bool>
-            </property>
-           </widget>
-          </item>
-          <item row="0" column="0">
-           <widget class="QPushButton" name="filter">
-            <property name="text">
-             <string>BROWSING_FILTER</string>
             </property>
            </widget>
           </item>
@@ -236,7 +209,7 @@
      <x>0</x>
      <y>0</y>
      <width>750</width>
-     <height>22</height>
+     <height>24</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuEdit">
@@ -250,13 +223,15 @@
     <addaction name="actionInvertSelection"/>
     <addaction name="separator"/>
     <addaction name="actionClose"/>
+    <addaction name="separator"/>
+    <addaction name="actionCreateFilteredDeck"/>
    </widget>
    <widget class="QMenu" name="menuJump">
     <property name="title">
      <string>QT_ACCEL_GO</string>
     </property>
     <addaction name="actionFind"/>
-    <addaction name="actionTags"/>
+    <addaction name="actionSidebarFilter"/>
     <addaction name="actionSidebar"/>
     <addaction name="actionNote"/>
     <addaction name="actionCardList"/>
@@ -287,7 +262,8 @@
     </widget>
     <addaction name="actionChange_Deck"/>
     <addaction name="separator"/>
-    <addaction name="actionReschedule"/>
+    <addaction name="action_set_due_date"/>
+    <addaction name="action_forget"/>
     <addaction name="actionReposition"/>
     <addaction name="separator"/>
     <addaction name="actionToggle_Suspend"/>
@@ -325,10 +301,7 @@
   </widget>
   <action name="actionReschedule">
    <property name="text">
-    <string>QT_ACCEL_RESCHEDULE</string>
-   </property>
-   <property name="shortcut">
-    <string notr="true">Ctrl+Alt+R</string>
+    <string notr="true">QT_ACCEL_RESCHEDULE</string>
    </property>
   </action>
   <action name="actionSelectAll">
@@ -416,7 +389,7 @@
     <string notr="true">Ctrl+Alt+F</string>
    </property>
   </action>
-  <action name="actionTags">
+  <action name="actionSidebarFilter">
    <property name="text">
     <string>QT_ACCEL_FILTER</string>
    </property>
@@ -450,7 +423,7 @@
     <string>BROWSING_FIRST_CARD</string>
    </property>
    <property name="shortcut">
-    <string/>
+    <string notr="true">Home</string>
    </property>
   </action>
   <action name="actionLastCard">
@@ -458,7 +431,7 @@
     <string>BROWSING_LAST_CARD</string>
    </property>
    <property name="shortcut">
-    <string/>
+    <string notr="true">End</string>
    </property>
   </action>
   <action name="actionClose">
@@ -490,7 +463,7 @@
     <string>BROWSING_REMOVE_TAGS</string>
    </property>
    <property name="shortcut">
-    <string notr="true">Ctrl+Shift+D</string>
+    <string notr="true">Ctrl+Alt+Shift+A</string>
    </property>
   </action>
   <action name="actionToggle_Suspend">
@@ -600,7 +573,28 @@
     <string>QT_ACCEL_EXPORT_NOTES</string>
    </property>
    <property name="shortcut">
-    <string/>
+    <string notr="true">Ctrl+Shift+E</string>
+   </property>
+  </action>
+  <action name="actionCreateFilteredDeck">
+   <property name="text">
+    <string>QT_MISC_CREATE_FILTERED_DECK</string>
+   </property>
+   <property name="shortcut">
+    <string notr="true">Ctrl+G</string>
+   </property>
+  </action>
+  <action name="action_set_due_date">
+   <property name="text">
+    <string>QT_ACCEL_SET_DUE_DATE</string>
+   </property>
+   <property name="shortcut">
+    <string notr="true">Ctrl+Shift+D</string>
+   </property>
+  </action>
+  <action name="action_forget">
+   <property name="text">
+    <string>QT_ACCEL_FORGET</string>
    </property>
   </action>
  </widget>

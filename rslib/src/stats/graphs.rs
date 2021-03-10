@@ -1,7 +1,13 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{backend_proto as pb, prelude::*, revlog::RevlogEntry, search::SortMode};
+use crate::{
+    backend_proto as pb,
+    config::{BoolKey, Weekday},
+    prelude::*,
+    revlog::RevlogEntry,
+    search::SortMode,
+};
 
 impl Collection {
     pub(crate) fn graph_data_for_search(
@@ -14,7 +20,7 @@ impl Collection {
         self.graph_data(all, days)
     }
 
-    fn graph_data(&self, all: bool, days: u32) -> Result<pb::GraphsOut> {
+    fn graph_data(&mut self, all: bool, days: u32) -> Result<pb::GraphsOut> {
         let timing = self.timing_today()?;
         let revlog_start = TimestampSecs(if days > 0 {
             timing.next_day_at - (((days as i64) + 1) * 86_400)
@@ -22,7 +28,7 @@ impl Collection {
             0
         });
 
-        let offset = self.local_offset();
+        let offset = self.local_utc_offset_for_user()?;
         let local_offset_secs = offset.local_minus_utc() as i64;
 
         let cards = self.storage.all_searched_cards()?;
@@ -40,9 +46,33 @@ impl Collection {
             revlog,
             days_elapsed: timing.days_elapsed,
             next_day_at_secs: timing.next_day_at as u32,
-            scheduler_version: self.sched_ver() as u32,
+            scheduler_version: self.scheduler_version() as u32,
             local_offset_secs: local_offset_secs as i32,
         })
+    }
+
+    pub(crate) fn get_graph_preferences(&self) -> Result<pb::GraphPreferences> {
+        Ok(pb::GraphPreferences {
+            calendar_first_day_of_week: self.get_first_day_of_week() as i32,
+            card_counts_separate_inactive: self.get_bool(BoolKey::CardCountsSeparateInactive),
+            browser_links_supported: true,
+            future_due_show_backlog: self.get_bool(BoolKey::FutureDueShowBacklog),
+        })
+    }
+
+    pub(crate) fn set_graph_preferences(&mut self, prefs: pb::GraphPreferences) -> Result<()> {
+        self.set_first_day_of_week(match prefs.calendar_first_day_of_week {
+            1 => Weekday::Monday,
+            5 => Weekday::Friday,
+            6 => Weekday::Saturday,
+            _ => Weekday::Sunday,
+        })?;
+        self.set_bool(
+            BoolKey::CardCountsSeparateInactive,
+            prefs.card_counts_separate_inactive,
+        )?;
+        self.set_bool(BoolKey::FutureDueShowBacklog, prefs.future_due_show_backlog)?;
+        Ok(())
     }
 }
 

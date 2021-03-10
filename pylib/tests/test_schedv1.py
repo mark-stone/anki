@@ -11,7 +11,8 @@ from tests.shared import getEmptyCol as getEmptyColOrig
 
 def getEmptyCol():
     col = getEmptyColOrig()
-    col.changeSchedulerVer(1)
+    # only safe in test environment
+    col.set_config("schedVer", 1)
     return col
 
 
@@ -558,6 +559,8 @@ def test_suspend():
 
 def test_cram():
     col = getEmptyCol()
+    opt = col.models.byName("Basic (and reversed card)")
+    col.models.setCurrent(opt)
     note = col.newNote()
     note["Front"] = "one"
     col.addNote(note)
@@ -653,10 +656,9 @@ def test_cram():
     c.load()
     assert col.sched.answerButtons(c) == 4
     # add a sibling so we can test minSpace, etc
-    c.col = None
-    c2 = copy.deepcopy(c)
-    c2.col = c.col = col
-    c2.id = 0
+    note["Back"] = "foo"
+    note.flush()
+    c2 = note.cards()[1]
     c2.ord = 1
     c2.due = 325
     c2.flush()
@@ -1075,23 +1077,6 @@ def test_forget():
     col.sched.forgetCards([c.id])
     col.reset()
     assert col.sched.counts() == (1, 0, 0)
-
-
-def test_resched():
-    col = getEmptyCol()
-    note = col.newNote()
-    note["Front"] = "one"
-    col.addNote(note)
-    c = note.cards()[0]
-    col.sched.reschedCards([c.id], 0, 0)
-    c.load()
-    assert c.due == col.sched.today
-    assert c.ivl == 1
-    assert c.queue == CARD_TYPE_REV and c.type == QUEUE_TYPE_REV
-    col.sched.reschedCards([c.id], 1, 1)
-    c.load()
-    assert c.due == col.sched.today + 1
-    assert c.ivl == +1
 
 
 def test_norelearn():

@@ -10,23 +10,35 @@
     import type { IntervalGraphData } from "./intervals";
     import type pb from "anki/backend_proto";
     import HistogramGraph from "./HistogramGraph.svelte";
-    import type { TableDatum } from "./graph-helpers";
+    import type { TableDatum, SearchEventMap } from "./graph-helpers";
     import TableData from "./TableData.svelte";
+    import { createEventDispatcher } from "svelte";
+    import type { PreferenceStore } from "./preferences";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
     export let i18n: I18n;
+    export let preferences: PreferenceStore;
+
+    const dispatch = createEventDispatcher<SearchEventMap>();
 
     let intervalData: IntervalGraphData | null = null;
     let histogramData = null as HistogramData | null;
     let tableData: TableDatum[] = [];
     let range = IntervalRange.Percentile95;
+    let { browserLinksSupported } = preferences;
 
     $: if (sourceData) {
         intervalData = gatherIntervalData(sourceData);
     }
 
     $: if (intervalData) {
-        [histogramData, tableData] = prepareIntervalData(intervalData, range, i18n);
+        [histogramData, tableData] = prepareIntervalData(
+            intervalData,
+            range,
+            i18n,
+            dispatch,
+            $browserLinksSupported
+        );
     }
 
     const title = i18n.tr(i18n.TR.STATISTICS_INTERVALS_TITLE);

@@ -6,19 +6,35 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-import type pb from "anki/backend_proto";
-import { interpolateBlues } from "d3-scale-chromatic";
-import "d3-transition";
-import { select, mouse } from "d3-selection";
-import { scaleLinear, scaleSequential } from "d3-scale";
+import pb from "anki/backend_proto";
+import {
+    interpolateBlues,
+    select,
+    pointer,
+    scaleLinear,
+    scaleSequentialSqrt,
+    timeDay,
+    timeYear,
+    timeSunday,
+    timeMonday,
+    timeFriday,
+    timeSaturday,
+} from "d3";
+import type { CountableTimeInterval } from "d3";
 import { showTooltip, hideTooltip } from "./tooltip";
-import { GraphBounds, setDataAvailable, RevlogRange } from "./graph-helpers";
-import { timeDay, timeYear, timeWeek } from "d3-time";
+import {
+    GraphBounds,
+    setDataAvailable,
+    RevlogRange,
+    SearchDispatch,
+} from "./graph-helpers";
 import type { I18n } from "anki/i18n";
 
 export interface GraphData {
     // indexed by day, where day is relative to today
     reviewCount: Map<number, number>;
+    timeFunction: CountableTimeInterval;
+    weekdayLabels: number[];
 }
 
 interface DayDatum {
@@ -31,7 +47,13 @@ interface DayDatum {
     date: Date;
 }
 
-export function gatherData(data: pb.BackendProto.GraphsOut): GraphData {
+type WeekdayType = pb.BackendProto.GraphPreferences.Weekday;
+const Weekday = pb.BackendProto.GraphPreferences.Weekday; /* enum */
+
+export function gatherData(
+    data: pb.BackendProto.GraphsOut,
+    firstDayOfWeek: WeekdayType
+): GraphData {
     const reviewCount = new Map<number, number>();
 
     for (const review of data.revlog as pb.BackendProto.RevlogEntry[]) {
@@ -45,17 +67,33 @@ export function gatherData(data: pb.BackendProto.GraphsOut): GraphData {
         reviewCount.set(day, count + 1);
     }
 
-    return { reviewCount };
+    const timeFunction =
+        firstDayOfWeek === Weekday.MONDAY
+            ? timeMonday
+            : firstDayOfWeek === Weekday.FRIDAY
+            ? timeFriday
+            : firstDayOfWeek === Weekday.SATURDAY
+            ? timeSaturday
+            : timeSunday;
+
+    const weekdayLabels: number[] = [];
+    for (let i = 0; i < 7; i++) {
+        weekdayLabels.push((firstDayOfWeek + i) % 7);
+    }
+
+    return { reviewCount, timeFunction, weekdayLabels };
 }
 
 export function renderCalendar(
     svgElem: SVGElement,
     bounds: GraphBounds,
     sourceData: GraphData,
+    dispatch: SearchDispatch,
     targetYear: number,
     i18n: I18n,
     nightMode: boolean,
-    revlogRange: RevlogRange
+    revlogRange: RevlogRange,
+    setFirstDayOfWeek: (d: number) => void
 ): void {
     const svg = select(svgElem);
     const now = new Date();
@@ -64,7 +102,8 @@ export function renderCalendar(
 
     const x = scaleLinear()
         .range([bounds.marginLeft, bounds.width - bounds.marginRight])
-        .domain([0, 53]);
+        .domain([-1, 53]);
+
     // map of 0-365 -> day
     const dayMap: Map<number, DayDatum> = new Map();
     let maxCount = 0;
@@ -73,8 +112,8 @@ export function renderCalendar(
         if (date.getFullYear() != targetYear) {
             continue;
         }
-        const weekNumber = timeWeek.count(timeYear(date), date);
-        const weekDay = timeDay.count(timeWeek(date), date);
+        const weekNumber = sourceData.timeFunction.count(timeYear(date), date);
+        const weekDay = timeDay.count(sourceData.timeFunction(date), date);
         const yearDay = timeDay.count(timeYear(date), date);
         dayMap.set(yearDay, { day, count, weekNumber, weekDay, date } as DayDatum);
         if (count > maxCount) {
@@ -105,8 +144,8 @@ export function renderCalendar(
         }
         const yearDay = timeDay.count(timeYear(date), date);
         if (!dayMap.has(yearDay)) {
-            const weekNumber = timeWeek.count(timeYear(date), date);
-            const weekDay = timeDay.count(timeWeek(date), date);
+            const weekNumber = sourceData.timeFunction.count(timeYear(date), date);
+            const weekDay = timeDay.count(sourceData.timeFunction(date), date);
             dayMap.set(yearDay, {
                 day: yearDay,
                 count: 0,
@@ -118,10 +157,9 @@ export function renderCalendar(
     }
     const data = Array.from(dayMap.values());
     const cappedRange = scaleLinear().range([0.2, nightMode ? 0.8 : 1]);
-    const blues = scaleSequential((n) => interpolateBlues(cappedRange(n)!)).domain([
-        0,
-        maxCount,
-    ]);
+    const blues = scaleSequentialSqrt()
+        .domain([0, maxCount])
+        .interpolator((n) => interpolateBlues(cappedRange(n)!));
 
     function tooltipText(d: DayDatum): string {
         const date = d.date.toLocaleString(i18n.langs, {
@@ -135,33 +173,54 @@ export function renderCalendar(
     }
 
     const height = bounds.height / 10;
-    let emptyColour = "#ddd";
-    if (nightMode) {
-        emptyColour = "#333";
-    }
-    svg.select(`g.days`)
+    const emptyColour = nightMode ? "#333" : "#ddd";
+
+    svg.select("g.weekdays")
+        .selectAll("text")
+        .data(sourceData.weekdayLabels)
+        .join("text")
+        .text((d: number) => i18n.weekdayLabel(d))
+        .attr("width", x(-1)! - 2)
+        .attr("height", height - 2)
+        .attr("x", x(1)! - 3)
+        .attr("y", (_d, index) => bounds.marginTop + index * height)
+        .attr("fill", nightMode ? "#ddd" : "black")
+        .attr("dominant-baseline", "hanging")
+        .attr("text-anchor", "end")
+        .attr("font-size", "small")
+        .attr("font-family", "monospace")
+        .style("user-select", "none")
+        .on("click", null)
+        .filter((d: number) =>
+            [Weekday.SUNDAY, Weekday.MONDAY, Weekday.FRIDAY, Weekday.SATURDAY].includes(
+                d
+            )
+        )
+        .on("click", (_event: MouseEvent, d: number) => setFirstDayOfWeek(d));
+
+    svg.select("g.days")
         .selectAll("rect")
         .data(data)
         .join("rect")
         .attr("fill", emptyColour)
-        .attr("width", (d) => {
-            return x(d.weekNumber + 1)! - x(d.weekNumber)! - 2;
-        })
+        .attr("width", (d) => x(d.weekNumber + 1)! - x(d.weekNumber)! - 2)
         .attr("height", height - 2)
-        .attr("x", (d) => x(d.weekNumber)!)
+        .attr("x", (d) => x(d.weekNumber + 1)!)
         .attr("y", (d) => bounds.marginTop + d.weekDay * height)
-        .on("mousemove", function (this: any, d: any) {
-            const [x, y] = mouse(document.body);
+        .on("mousemove", (event: MouseEvent, d: DayDatum) => {
+            const [x, y] = pointer(event, document.body);
             showTooltip(tooltipText(d), x, y);
         })
         .on("mouseout", hideTooltip)
+        .attr("class", (d: any): string => {
+            return d.count > 0 ? "clickable" : "";
+        })
+        .on("click", function (_event: MouseEvent, d: any) {
+            if (d.count > 0) {
+                dispatch("search", { query: `"prop:rated=${d.day}"` });
+            }
+        })
         .transition()
         .duration(800)
-        .attr("fill", (d) => {
-            if (d.count === 0) {
-                return emptyColour;
-            } else {
-                return blues(d.count)!;
-            }
-        });
+        .attr("fill", (d) => (d.count === 0 ? emptyColour : blues(d.count)!));
 }

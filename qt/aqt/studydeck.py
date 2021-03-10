@@ -1,17 +1,24 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
+from typing import List, Optional
+
 import aqt
+from anki.errors import DeckIsFilteredError
 from aqt import gui_hooks
 from aqt.qt import *
 from aqt.utils import (
     TR,
+    HelpPage,
+    HelpPageArgument,
+    disable_help_button,
     getOnlyText,
     openHelp,
     restoreGeom,
     saveGeom,
     shortcut,
     showInfo,
+    showWarning,
     tr,
 )
 
@@ -19,34 +26,33 @@ from aqt.utils import (
 class StudyDeck(QDialog):
     def __init__(
         self,
-        mw,
-        names=None,
-        accept=None,
-        title=None,
-        help="studying?id=keyboard-shortcuts",
-        current=None,
-        cancel=True,
-        parent=None,
-        dyn=False,
-        buttons=None,
-        geomKey="default",
+        mw: aqt.AnkiQt,
+        names: Callable = None,
+        accept: str = None,
+        title: str = None,
+        help: HelpPageArgument = HelpPage.KEYBOARD_SHORTCUTS,
+        current: Optional[str] = None,
+        cancel: bool = True,
+        parent: Optional[QDialog] = None,
+        dyn: bool = False,
+        buttons: Optional[List[str]] = None,
+        geomKey: str = "default",
     ) -> None:
         QDialog.__init__(self, parent or mw)
-        if buttons is None:
-            buttons = []
         self.mw = mw
         self.form = aqt.forms.studydeck.Ui_Dialog()
         self.form.setupUi(self)
         self.form.filter.installEventFilter(self)
         self.cancel = cancel
         gui_hooks.state_did_reset.append(self.onReset)
-        self.geomKey = "studyDeck-" + geomKey
+        self.geomKey = f"studyDeck-{geomKey}"
         restoreGeom(self, self.geomKey)
+        disable_help_button(self)
         if not cancel:
             self.form.buttonBox.removeButton(
                 self.form.buttonBox.button(QDialogButtonBox.Cancel)
             )
-        if buttons:
+        if buttons is not None:
             for b in buttons:
                 self.form.buttonBox.addButton(b, QDialogButtonBox.ActionRole)
         else:
@@ -58,18 +64,18 @@ class StudyDeck(QDialog):
         if title:
             self.setWindowTitle(title)
         if not names:
-            names = [
+            names_ = [
                 d.name
                 for d in self.mw.col.decks.all_names_and_ids(
                     include_filtered=dyn, skip_empty_default=True
                 )
             ]
             self.nameFunc = None
-            self.origNames = names
+            self.origNames = names_
         else:
             self.nameFunc = names
             self.origNames = names()
-        self.name = None
+        self.name: Optional[str] = None
         self.ok = self.form.buttonBox.addButton(
             accept or tr(TR.DECKS_STUDY), QDialogButtonBox.AcceptRole
         )
@@ -104,7 +110,7 @@ class StudyDeck(QDialog):
                 return True
         return False
 
-    def redraw(self, filt, focus=None):
+    def redraw(self, filt: str, focus: Optional[str] = None) -> None:
         self.filt = filt
         self.focus = focus
         self.names = [n for n in self.origNames if self._matches(n, filt)]
@@ -118,7 +124,7 @@ class StudyDeck(QDialog):
         l.setCurrentRow(idx)
         l.scrollToItem(l.item(idx), QAbstractItemView.PositionAtCenter)
 
-    def _matches(self, name, filt):
+    def _matches(self, name: str, filt: str) -> bool:
         name = name.lower()
         filt = filt.lower()
         if not filt:
@@ -128,7 +134,7 @@ class StudyDeck(QDialog):
                 return False
         return True
 
-    def onReset(self):
+    def onReset(self) -> None:
         # model updated?
         if self.nameFunc:
             self.origNames = self.nameFunc()
@@ -158,7 +164,11 @@ class StudyDeck(QDialog):
         n = getOnlyText(tr(TR.DECKS_NEW_DECK_NAME), default=default)
         n = n.strip()
         if n:
-            did = self.mw.col.decks.id(n)
+            try:
+                did = self.mw.col.decks.id(n)
+            except DeckIsFilteredError as err:
+                showWarning(str(err))
+                return
             # deck name may not be the same as user input. ex: ", ::
             self.name = self.mw.col.decks.name(did)
             # make sure we clean up reset hook when manually exiting

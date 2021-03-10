@@ -9,8 +9,8 @@ from anki.collection import Collection
 from anki.consts import *
 from anki.decks import DeckManager
 from anki.importing.base import Importer
-from anki.rsbackend import TR
-from anki.utils import intTime, joinFields, splitFields
+from anki.lang import TR
+from anki.utils import intTime, joinFields, splitFields, stripHTMLMedia
 
 GUID = 1
 MID = 2
@@ -30,7 +30,7 @@ class Anki2Importer(Importer):
 
         # set later, defined here for typechecking
         self._decks: Dict[int, int] = {}
-        self.mustResetLearning = False
+        self.source_needs_upgrade = False
 
     def run(self, media: None = None) -> None:
         self._prepareFiles()
@@ -44,7 +44,7 @@ class Anki2Importer(Importer):
 
     def _prepareFiles(self) -> None:
         importingV2 = self.file.endswith(".anki21")
-        self.mustResetLearning = False
+        self.source_needs_upgrade = False
 
         self.dst = self.col
         self.src = Collection(self.file)
@@ -52,7 +52,9 @@ class Anki2Importer(Importer):
         if not importingV2 and self.col.schedVer() != 1:
             # any scheduling included?
             if self.src.db.scalar("select 1 from cards where queue != 0 limit 1"):
-                self.mustResetLearning = True
+                self.source_needs_upgrade = True
+        elif importingV2 and self.col.schedVer() == 1:
+            raise Exception("must upgrade to new scheduler to import this file")
 
     def _import(self) -> None:
         self._decks = {}
@@ -71,7 +73,9 @@ class Anki2Importer(Importer):
     ######################################################################
 
     def _logNoteRow(self, action: str, noteRow: List[str]) -> None:
-        self.log.append("[%s] %s" % (action, noteRow[6].replace("\x1f", ", ")))
+        self.log.append(
+            "[%s] %s" % (action, stripHTMLMedia(noteRow[6].replace("\x1f", ", ")))
+        )
 
     def _importNotes(self) -> None:
         # build guid -> (id,mod,mid) hash & map of existing note ids
@@ -263,7 +267,7 @@ class Anki2Importer(Importer):
             tmpname = "::".join(DeckManager.path(name)[1:])
             name = self.deckPrefix
             if tmpname:
-                name += "::" + tmpname
+                name += f"::{tmpname}"
         # manually create any parents so we can pull in descriptions
         head = ""
         for parent in DeckManager.immediate_parent_path(name):
@@ -298,9 +302,8 @@ class Anki2Importer(Importer):
     ######################################################################
 
     def _importCards(self) -> None:
-        if self.mustResetLearning:
-            self.src.modSchema(check=False)
-            self.src.changeSchedulerVer(2)
+        if self.source_needs_upgrade:
+            self.src.upgrade_to_v2_scheduler()
         # build map of (guid, ord) -> cid and used id cache
         self._cards: Dict[Tuple[str, int], int] = {}
         existing = {}
@@ -407,7 +410,7 @@ insert or ignore into revlog values (?,?,?,?,?,?,?,?,?)""",
         try:
             with open(path, "rb") as f:
                 return f.read()
-        except (IOError, OSError):
+        except OSError:
             return b""
 
     def _srcMediaData(self, fname: str) -> bytes:
@@ -423,7 +426,7 @@ insert or ignore into revlog values (?,?,?,?,?,?,?,?,?)""",
         try:
             with open(path, "wb") as f:
                 f.write(data)
-        except (OSError, IOError):
+        except OSError:
             # the user likely used subdirectories
             pass
 
@@ -439,7 +442,7 @@ insert or ignore into revlog values (?,?,?,?,?,?,?,?,?)""",
                 return match.group(0)
             # if model-local file exists from a previous import, use that
             name, ext = os.path.splitext(fname)
-            lname = "%s_%s%s" % (name, mid, ext)
+            lname = f"{name}_{mid}{ext}"
             if self.dst.media.have(lname):
                 return match.group(0).replace(fname, lname)
             # if missing or the same, pass unmodified

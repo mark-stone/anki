@@ -7,14 +7,21 @@
  */
 
 import type pb from "anki/backend_proto";
-import { extent, histogram, sum } from "d3-array";
-import { scaleLinear, scaleSequential } from "d3-scale";
+
+import {
+    extent,
+    histogram,
+    sum,
+    scaleLinear,
+    scaleSequential,
+    interpolateBlues,
+} from "d3";
+import type { Bin } from "d3";
 import type { HistogramData } from "./histogram-graph";
-import { interpolateBlues } from "d3-scale-chromatic";
 import type { I18n } from "anki/i18n";
 import { dayLabel } from "anki/time";
 import { GraphRange } from "./graph-helpers";
-import type { TableDatum } from "./graph-helpers";
+import type { TableDatum, SearchDispatch } from "./graph-helpers";
 
 export interface GraphData {
     daysAdded: number[];
@@ -28,10 +35,23 @@ export function gatherData(data: pb.BackendProto.GraphsOut): GraphData {
     return { daysAdded };
 }
 
+function makeQuery(start: number, end: number): string {
+    const include = `"added:${start}"`;
+
+    if (start === 1) {
+        return include;
+    }
+
+    const exclude = `-"added:${end}"`;
+    return `${include} AND ${exclude}`;
+}
+
 export function buildHistogram(
     data: GraphData,
     range: GraphRange,
-    i18n: I18n
+    i18n: I18n,
+    dispatch: SearchDispatch,
+    browserLinksSupported: boolean
 ): [HistogramData | null, TableDatum[]] {
     // get min/max
     const total = data.daysAdded.length;
@@ -39,7 +59,7 @@ export function buildHistogram(
         return [null, []];
     }
 
-    const [xMinOrig, _xMax] = extent(data.daysAdded);
+    const [xMinOrig] = extent(data.daysAdded);
     let xMin = xMinOrig;
 
     // cap max to selected range
@@ -89,12 +109,10 @@ export function buildHistogram(
     ];
 
     function hoverText(
-        data: HistogramData,
-        binIdx: number,
+        bin: Bin<number, number>,
         cumulative: number,
         _percent: number
     ): string {
-        const bin = data.bins[binIdx];
         const day = dayLabel(i18n, bin.x0!, bin.x1!);
         const cards = i18n.tr(i18n.TR.STATISTICS_CARDS, { cards: bin.length });
         const total = i18n.tr(i18n.TR.STATISTICS_RUNNING_TOTAL);
@@ -102,8 +120,23 @@ export function buildHistogram(
         return `${day}:<br>${cards}<br>${total}: ${totalCards}`;
     }
 
+    function onClick(bin: Bin<number, number>): void {
+        const start = Math.abs(bin.x0!) + 1;
+        const end = Math.abs(bin.x1!) + 1;
+        const query = makeQuery(start, end);
+        dispatch("search", { query });
+    }
+
     return [
-        { scale, bins, total: totalInPeriod, hoverText, colourScale, showArea: true },
+        {
+            scale,
+            bins,
+            total: totalInPeriod,
+            hoverText,
+            onClick: browserLinksSupported ? onClick : null,
+            colourScale,
+            showArea: true,
+        },
         tableData,
     ];
 }

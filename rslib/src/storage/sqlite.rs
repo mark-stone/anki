@@ -1,11 +1,11 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::config::schema11_config_as_string;
+use crate::config::schema11::schema11_config_as_string;
 use crate::err::Result;
 use crate::err::{AnkiError, DBErrorKind};
 use crate::timestamp::{TimestampMillis, TimestampSecs};
-use crate::{i18n::I18n, sched::cutoff::v1_creation_date, text::without_combining};
+use crate::{i18n::I18n, scheduler::timing::v1_creation_date, text::without_combining};
 use regex::Regex;
 use rusqlite::{functions::FunctionFlags, params, Connection, NO_PARAMS};
 use std::cmp::Ordering;
@@ -170,7 +170,7 @@ impl SqliteStorage {
                 "update col set crt=?, scm=?, ver=?, conf=?",
                 params![
                     crt,
-                    crt * 1000,
+                    TimestampMillis::now(),
                     SCHEMA_STARTING_VERSION,
                     &schema11_config_as_string()
                 ],

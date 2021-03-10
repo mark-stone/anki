@@ -27,6 +27,18 @@ impl TimestampSecs {
     pub(crate) fn date_string(self, offset: FixedOffset) -> String {
         offset.timestamp(self.0, 0).format("%Y-%m-%d").to_string()
     }
+
+    pub fn local_utc_offset(self) -> FixedOffset {
+        *Local.timestamp(self.0, 0).offset()
+    }
+
+    pub fn datetime(self, utc_offset: FixedOffset) -> DateTime<FixedOffset> {
+        utc_offset.timestamp(self.0, 0)
+    }
+
+    pub fn adding_secs(self, secs: i64) -> Self {
+        TimestampSecs(self.0 + secs)
+    }
 }
 
 impl TimestampMillis {
@@ -44,7 +56,7 @@ impl TimestampMillis {
 }
 
 lazy_static! {
-    static ref TESTING: bool = env::var("SHIFT_CLOCK_HACK").is_ok();
+    pub(crate) static ref TESTING: bool = env::var("ANKI_TEST_MODE").is_ok();
 }
 
 fn elapsed() -> time::Duration {
@@ -54,7 +66,7 @@ fn elapsed() -> time::Duration {
         let mut elap = time::SystemTime::now()
             .duration_since(time::SystemTime::UNIX_EPOCH)
             .unwrap();
-        let now = Local::now();
+        let now = Utc::now();
         if now.hour() >= 2 && now.hour() < 4 {
             elap -= time::Duration::from_secs(60 * 60 * 2);
         }

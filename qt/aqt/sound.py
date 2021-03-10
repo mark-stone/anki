@@ -1,7 +1,11 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
+from __future__ import annotations
+
 import atexit
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -11,24 +15,32 @@ import wave
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
 from operator import itemgetter
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import aqt
 from anki import hooks
 from anki.cards import Card
 from anki.sound import AV_REF_RE, AVTag, SoundOrVideoTag
-from anki.utils import isLin, isMac, isWin
+from anki.types import assert_exhaustive
+from anki.utils import isLin, isMac, isWin, namedtmp
 from aqt import gui_hooks
 from aqt.mpv import MPV, MPVBase, MPVCommandError
+from aqt.profiles import RecordingDriver
 from aqt.qt import *
 from aqt.taskman import TaskManager
-from aqt.utils import TR, restoreGeom, saveGeom, showWarning, startup_info, tr
+from aqt.utils import (
+    TR,
+    disable_help_button,
+    restoreGeom,
+    saveGeom,
+    showWarning,
+    startup_info,
+    tooltip,
+    tr,
+)
 
-try:
-    import pyaudio
-except:
-    pyaudio = None
-
+if TYPE_CHECKING:
+    from PyQt5.QtMultimedia import QAudioRecorder
 
 # AV player protocol
 ##########################################################################
@@ -125,7 +137,7 @@ class VideoPlayer(Player):  # pylint: disable=abstract-method
 
 class AVPlayer:
     players: List[Player] = []
-    # when a new batch of audio is played, shoud the currently playing
+    # when a new batch of audio is played, should the currently playing
     # audio be stopped?
     interrupt_current_audio = True
 
@@ -197,7 +209,7 @@ class AVPlayer:
             gui_hooks.av_player_will_play(tag)
             self.current_player.play(tag, self._on_play_finished)
         else:
-            print("no players found for", tag)
+            tooltip(f"no players found for {tag}")
 
     def _best_player_for_tag(self, tag: AVTag) -> Optional[Player]:
         ranked = []
@@ -228,7 +240,7 @@ def _packagedCmd(cmd: List[str]) -> Tuple[Any, Dict[str, str]]:
         del env["LD_LIBRARY_PATH"]
     if isMac:
         dir = os.path.dirname(os.path.abspath(__file__))
-        exeDir = os.path.abspath(dir + "/../../Resources/audio")
+        exeDir = os.path.abspath(f"{dir}/../../Resources/audio")
     else:
         exeDir = os.path.dirname(os.path.abspath(sys.argv[0]))
         if isWin and not cmd[0].endswith(".exe"):
@@ -341,7 +353,7 @@ class SimpleMpvPlayer(SimpleProcessPlayer, VideoPlayer):
 
     def __init__(self, taskman: TaskManager, base_folder: str) -> None:
         super().__init__(taskman)
-        self.args += ["--config-dir=" + base_folder]
+        self.args += [f"--config-dir={base_folder}"]
 
 
 class SimpleMplayerPlayer(SimpleProcessPlayer, SoundOrVideoPlayer):
@@ -365,7 +377,7 @@ class MpvManager(MPV, SoundOrVideoPlayer):
         mpvPath, self.popenEnv = _packagedCmd(["mpv"])
         self.executable = mpvPath[0]
         self._on_done: Optional[OnDoneCallback] = None
-        self.default_argv += ["--config-dir=" + base_path]
+        self.default_argv += [f"--config-dir={base_path}"]
         super().__init__(window_id=None, debug=False)
 
     def on_init(self) -> None:
@@ -426,7 +438,7 @@ class MpvManager(MPV, SoundOrVideoPlayer):
 
 
 class SimpleMplayerSlaveModePlayer(SimpleMplayerPlayer):
-    def __init__(self, taskman: TaskManager):
+    def __init__(self, taskman: TaskManager) -> None:
         super().__init__(taskman)
         self.args.append("-slave")
 
@@ -461,53 +473,164 @@ class SimpleMplayerSlaveModePlayer(SimpleMplayerPlayer):
         self.command("pause")
 
 
+# MP3 transcoding
+##########################################################################
+
+
+def _encode_mp3(src_wav: str, dst_mp3: str) -> None:
+    cmd = ["lame", src_wav, dst_mp3, "--noreplaygain", "--quiet"]
+    cmd, env = _packagedCmd(cmd)
+    try:
+        retcode = retryWait(subprocess.Popen(cmd, startupinfo=startup_info(), env=env))
+    except Exception as e:
+        raise Exception(tr(TR.MEDIA_ERROR_RUNNING, val=" ").join(cmd)) from e
+    if retcode != 0:
+        raise Exception(tr(TR.MEDIA_ERROR_RUNNING, val=" ").join(cmd))
+
+    os.unlink(src_wav)
+
+
+def encode_mp3(mw: aqt.AnkiQt, src_wav: str, on_done: Callable[[str], None]) -> None:
+    "Encode the provided wav file to .mp3, and call on_done() with the path."
+    dst_mp3 = src_wav.replace(".wav", "%d.mp3" % time.time())
+
+    def _on_done(fut: Future) -> None:
+        fut.result()
+        on_done(dst_mp3)
+
+    mw.taskman.run_in_background(lambda: _encode_mp3(src_wav, dst_mp3), _on_done)
+
+
+# Recording interface
+##########################################################################
+
+
+class Recorder(ABC):
+    # seconds to wait before recording
+    STARTUP_DELAY = 0.3
+
+    def __init__(self, output_path: str) -> None:
+        self.output_path = output_path
+
+    def start(self, on_done: Callable[[], None]) -> None:
+        "Start recording, then call on_done() when started."
+        self._started_at = time.time()
+        on_done()
+
+    def stop(self, on_done: Callable[[str], None]) -> None:
+        "Stop recording, then call on_done() when finished."
+        on_done(self.output_path)
+
+    def duration(self) -> float:
+        "Seconds since recording started."
+        return time.time() - self._started_at
+
+    def on_timer(self) -> None:
+        "Will be called periodically."
+
+
+# QAudioInput recording
+##########################################################################
+
+
+class QtAudioInputRecorder(Recorder):
+    def __init__(self, output_path: str, mw: aqt.AnkiQt, parent: QWidget) -> None:
+        super().__init__(output_path)
+
+        self.mw = mw
+        self._parent = parent
+
+        from PyQt5.QtMultimedia import QAudioDeviceInfo, QAudioFormat, QAudioInput
+
+        format = QAudioFormat()
+        format.setChannelCount(1)
+        format.setSampleRate(44100)
+        format.setSampleSize(16)
+        format.setCodec("audio/pcm")
+        format.setByteOrder(QAudioFormat.LittleEndian)
+        format.setSampleType(QAudioFormat.SignedInt)
+
+        device = QAudioDeviceInfo.defaultInputDevice()
+        if not device.isFormatSupported(format):
+            format = device.nearestFormat(format)
+            print("format changed")
+            print("channels", format.channelCount())
+            print("rate", format.sampleRate())
+            print("size", format.sampleSize())
+        self._format = format
+
+        self._audio_input = QAudioInput(device, format, parent)
+
+    def start(self, on_done: Callable[[], None]) -> None:
+        self._iodevice = self._audio_input.start()
+        self._buffer = b""
+        self._iodevice.readyRead.connect(self._on_read_ready)  # type: ignore
+        super().start(on_done)
+
+    def _on_read_ready(self) -> None:
+        self._buffer += self._iodevice.readAll()
+
+    def stop(self, on_done: Callable[[str], None]) -> None:
+        def on_stop_timer() -> None:
+            # read anything remaining in buffer & stop
+            self._on_read_ready()
+            self._audio_input.stop()
+
+            if err := self._audio_input.error():
+                showWarning(f"recording failed: {err}")
+                return
+
+            def write_file() -> None:
+                # swallow the first 300ms to allow audio device to quiesce
+                wait = int(44100 * self.STARTUP_DELAY)
+                if len(self._buffer) <= wait:
+                    return
+                self._buffer = self._buffer[wait:]
+
+                # write out the wave file
+                wf = wave.open(self.output_path, "wb")
+                wf.setnchannels(self._format.channelCount())
+                wf.setsampwidth(self._format.sampleSize() // 8)
+                wf.setframerate(self._format.sampleRate())
+                wf.writeframes(self._buffer)
+                wf.close()
+
+            def and_then(fut: Future) -> None:
+                fut.result()
+                Recorder.stop(self, on_done)
+
+            self.mw.taskman.run_in_background(write_file, and_then)
+
+        # schedule the stop for half a second in the future,
+        # to avoid truncating the end of the recording
+        self._stop_timer = t = QTimer(self._parent)
+        t.timeout.connect(on_stop_timer)  # type: ignore
+        t.setSingleShot(True)
+        t.start(500)
+
+
 # PyAudio recording
 ##########################################################################
+
+try:
+    import pyaudio
+except:
+    pyaudio = None
 
 
 PYAU_CHANNELS = 1
 PYAU_INPUT_INDEX: Optional[int] = None
 
-processingSrc = "rec.wav"
-processingDst = "rec.mp3"
-recFiles: List[str] = []
-
-processingChain: List[List[str]] = [
-    ["lame", processingSrc, processingDst, "--noreplaygain", "--quiet"],
-]
-
-
-class _Recorder:
-    def postprocess(self, encode=True) -> None:
-        self.encode = encode
-        for c in processingChain:
-            # print c
-            if not self.encode and c[0] == "lame":
-                continue
-            try:
-                cmd, env = _packagedCmd(c)
-                ret = retryWait(
-                    subprocess.Popen(cmd, startupinfo=startup_info(), env=env)
-                )
-            except:
-                ret = True
-            finally:
-                self.cleanup()
-            if ret:
-                raise Exception(tr(TR.MEDIA_ERROR_RUNNING, val=" ").join(cmd))
-
-    def cleanup(self) -> None:
-        if os.path.exists(processingSrc):
-            os.unlink(processingSrc)
-
 
 class PyAudioThreadedRecorder(threading.Thread):
-    def __init__(self, startupDelay: float) -> None:
+    def __init__(self, output_path: str, startup_delay: float) -> None:
         threading.Thread.__init__(self)
-        self.startupDelay = startupDelay
+        self._output_path = output_path
+        self._startup_delay = startup_delay
         self.finish = False
+        # though we're using pyaudio here, we rely on Qt to trigger
+        # the permission prompt on macOS
         if isMac and qtminor > 12:
-            # trigger permission prompt
             from PyQt5.QtMultimedia import QAudioDeviceInfo
 
             QAudioDeviceInfo.defaultInputDevice()
@@ -517,7 +640,6 @@ class PyAudioThreadedRecorder(threading.Thread):
         p = pyaudio.PyAudio()
 
         rate = int(p.get_default_input_device_info()["defaultSampleRate"])
-        wait = int(rate * self.startupDelay)
         PYAU_FORMAT = pyaudio.paInt16
 
         stream = p.open(
@@ -529,14 +651,19 @@ class PyAudioThreadedRecorder(threading.Thread):
             frames_per_buffer=chunk,
         )
 
+        # swallow the first 300ms to allow audio device to quiesce
+        wait = int(rate * self._startup_delay)
         stream.read(wait, exception_on_overflow=False)
 
+        # read data in a loop until self.finish is set
         data = b""
         while not self.finish:
             data += stream.read(chunk, exception_on_overflow=False)
+
+        # write out the wave file
         stream.close()
         p.terminate()
-        wf = wave.open(processingSrc, "wb")
+        wf = wave.open(self._output_path, "wb")
         wf.setnchannels(PYAU_CHANNELS)
         wf.setsampwidth(p.get_sample_size(PYAU_FORMAT))
         wf.setframerate(rate)
@@ -544,80 +671,132 @@ class PyAudioThreadedRecorder(threading.Thread):
         wf.close()
 
 
-class PyAudioRecorder(_Recorder):
+class PyAudioRecorder(Recorder):
+    def __init__(self, mw: aqt.AnkiQt, output_path: str) -> None:
+        super().__init__(output_path)
+        self.mw = mw
 
-    # discard first 250ms which may have pops/cracks
-    startupDelay = 0.25
-
-    def __init__(self) -> None:
-        for t in recFiles + [processingSrc, processingDst]:
-            try:
-                os.unlink(t)
-            except OSError:
-                pass
-        self.encode = False
-
-    def start(self) -> None:
-        self.thread = PyAudioThreadedRecorder(startupDelay=self.startupDelay)
+    def start(self, on_done: Callable[[], None]) -> None:
+        self.thread = PyAudioThreadedRecorder(self.output_path, self.STARTUP_DELAY)
         self.thread.start()
+        super().start(on_done)
 
-    def stop(self) -> None:
+    def stop(self, on_done: Callable[[str], None]) -> None:
+        # ensure at least a second captured
+        while self.duration() < 1:
+            time.sleep(0.1)
+
+        def func(fut: Future) -> None:
+            Recorder.stop(self, on_done)
+
         self.thread.finish = True
-        self.thread.join()
+        self.mw.taskman.run_in_background(self.thread.join, func)
 
-    def file(self) -> str:
-        if self.encode:
-            tgt = "rec%d.mp3" % time.time()
-            os.rename(processingDst, tgt)
-            return tgt
-        else:
-            return processingSrc
-
-
-Recorder = PyAudioRecorder
 
 # Recording dialog
 ##########################################################################
 
 
-def getAudio(parent: QWidget, encode: bool = True) -> Optional[str]:
-    "Record and return filename"
-    if not pyaudio:
-        showWarning("Please install pyaudio.")
-        return None
-    # record first
-    r = Recorder()
-    mb = QMessageBox(parent)
-    restoreGeom(mb, "audioRecorder")
-    mb.setWindowTitle("Anki")
-    mb.setIconPixmap(QPixmap(":/icons/media-record.png"))
-    but = QPushButton(tr(TR.ACTIONS_SAVE))
-    mb.addButton(but, QMessageBox.AcceptRole)
-    but.setDefault(True)
-    but = QPushButton(tr(TR.ACTIONS_CANCEL))
-    mb.addButton(but, QMessageBox.RejectRole)
-    mb.setEscapeButton(but)
-    t = time.time()
-    r.start()
-    time.sleep(r.startupDelay)
-    QApplication.instance().processEvents()  # type: ignore
-    while not mb.clickedButton():
-        txt = tr(TR.MEDIA_RECORDINGTIME)
-        mb.setText(txt % (time.time() - t))
-        mb.show()
-        QApplication.instance().processEvents()  # type: ignore
-    if mb.clickedButton() == mb.escapeButton():
-        r.stop()
-        r.cleanup()
-        return None
-    saveGeom(mb, "audioRecorder")
-    # ensure at least a second captured
-    while time.time() - t < 1:
-        time.sleep(0.1)
-    r.stop()
-    # process
-    r.postprocess(encode)
-    return r.file()
+class RecordDialog(QDialog):
+    _recorder: Recorder
+
+    def __init__(
+        self,
+        parent: QWidget,
+        mw: aqt.AnkiQt,
+        on_success: Callable[[str], None],
+    ):
+        QDialog.__init__(self, parent)
+        self._parent = parent
+        self.mw = mw
+        self._on_success = on_success
+        disable_help_button(self)
+
+        self._start_recording()
+        self._setup_dialog()
+
+    def _setup_dialog(self) -> None:
+        self.setWindowTitle("Anki")
+        icon = QLabel()
+        icon.setPixmap(QPixmap(":/icons/media-record.png"))
+        self.label = QLabel("...")
+        hbox = QHBoxLayout()
+        hbox.addWidget(icon)
+        hbox.addWidget(self.label)
+        v = QVBoxLayout()
+        v.addLayout(hbox)
+        buts = QDialogButtonBox.Save | QDialogButtonBox.Cancel
+        b = QDialogButtonBox(buts)  # type: ignore
+        v.addWidget(b)
+        self.setLayout(v)
+        save_button = b.button(QDialogButtonBox.Save)
+        save_button.setDefault(True)
+        save_button.setAutoDefault(True)
+        qconnect(save_button.clicked, self.accept)
+        cancel_button = b.button(QDialogButtonBox.Cancel)
+        cancel_button.setDefault(False)
+        cancel_button.setAutoDefault(False)
+        qconnect(cancel_button.clicked, self.reject)
+        restoreGeom(self, "audioRecorder2")
+        self.show()
+
+    def _save_diag(self) -> None:
+        saveGeom(self, "audioRecorder2")
+
+    def _start_recording(self) -> None:
+        driver = self.mw.pm.recording_driver()
+        if driver is RecordingDriver.PyAudio:
+            self._recorder = PyAudioRecorder(self.mw, namedtmp("rec.wav"))
+        elif driver is RecordingDriver.QtAudioInput:
+            self._recorder = QtAudioInputRecorder(
+                namedtmp("rec.wav"), self.mw, self._parent
+            )
+        else:
+            assert_exhaustive(driver)
+        self._recorder.start(self._start_timer)
+
+    def _start_timer(self) -> None:
+        self._timer = t = QTimer(self._parent)
+        t.timeout.connect(self._on_timer)  # type: ignore
+        t.setSingleShot(False)
+        t.start(100)
+
+    def _on_timer(self) -> None:
+        self._recorder.on_timer()
+        duration = self._recorder.duration()
+        self.label.setText(tr(TR.MEDIA_RECORDINGTIME, secs=f"{duration:0.1f}"))
+
+    def accept(self) -> None:
+        self._timer.stop()
+
+        try:
+            self._save_diag()
+            self._recorder.stop(self._on_success)
+        finally:
+            QDialog.accept(self)
+
+    def reject(self) -> None:
+        self._timer.stop()
+
+        def cleanup(out: str) -> None:
+            os.unlink(out)
+
+        try:
+            self._recorder.stop(cleanup)
+        finally:
+            QDialog.reject(self)
+
+
+def record_audio(
+    parent: QWidget, mw: aqt.AnkiQt, encode: bool, on_done: Callable[[str], None]
+) -> None:
+    def after_record(path: str) -> None:
+        if not encode:
+            on_done(path)
+        else:
+            encode_mp3(mw, path, on_done)
+
+    _diag = RecordDialog(parent, mw, after_record)
 
 
 # Legacy audio interface
@@ -633,7 +812,7 @@ def play(filename: str) -> None:
     av_player.play_file(filename)
 
 
-def playFromText(text) -> None:
+def playFromText(text: Any) -> None:
     print("playFromText() deprecated")
 
 
@@ -714,6 +893,13 @@ def setup_audio(taskman: TaskManager, base_folder: str) -> None:
         from aqt.tts import WindowsTTSPlayer
 
         av_player.players.append(WindowsTTSPlayer(taskman))
+
+        if platform.release() == "10":
+            from aqt.tts import WindowsRTTTSFilePlayer
+
+            # If Windows 10, ensure it's October 2018 update or later
+            if int(platform.version().split(".")[-1]) >= 17763:
+                av_player.players.append(WindowsRTTTSFilePlayer(taskman))
 
     # cleanup at shutdown
     atexit.register(av_player.shutdown)

@@ -5,9 +5,15 @@ from __future__ import annotations
 
 import locale
 import re
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import anki
+import anki._backend.backend_pb2 as _pb
+import anki._backend.fluent_pb2 as _fluent_pb
+
+# public exports
+TR = _fluent_pb.FluentString
+FormatTimeSpan = _pb.FormatTimespanIn
 
 langs = sorted(
     [
@@ -142,7 +148,7 @@ def lang_to_disk_lang(lang: str) -> str:
 currentLang = "en"
 
 # the current Fluent translation instance
-current_i18n: Optional[anki.rsbackend.RustBackend] = None
+current_i18n: Optional[anki._backend.RustBackend] = None
 
 # path to locale folder
 locale_folder = ""
@@ -158,7 +164,7 @@ def ngettext(single: str, plural: str, n: int) -> str:
     return plural
 
 
-def tr_legacyglobal(*args, **kwargs) -> str:
+def tr_legacyglobal(*args: Any, **kwargs: Any) -> str:
     "Should use col.tr() instead."
     if current_i18n:
         return current_i18n.translate(*args, **kwargs)
@@ -169,7 +175,7 @@ def tr_legacyglobal(*args, **kwargs) -> str:
 def set_lang(lang: str, locale_dir: str) -> None:
     global currentLang, current_i18n, locale_folder
     currentLang = lang
-    current_i18n = anki.rsbackend.RustBackend(ftl_folder=locale_folder, langs=[lang])
+    current_i18n = anki._backend.RustBackend(ftl_folder=locale_folder, langs=[lang])
     locale_folder = locale_dir
 
 

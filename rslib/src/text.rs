@@ -117,7 +117,7 @@ pub fn strip_av_tags(text: &str) -> Cow<str> {
 }
 
 /// Extract audio tags from string, replacing them with [anki:play] refs
-pub fn extract_av_tags<'a>(text: &'a str, question_side: bool) -> (Cow<'a, str>, Vec<AVTag>) {
+pub fn extract_av_tags(text: &str, question_side: bool) -> (Cow<str>, Vec<AVTag>) {
     let mut tags = vec![];
     let context = if question_side { 'q' } else { 'a' };
     let replaced_text = AV_TAGS.replace_all(text, |caps: &Captures| {
@@ -215,7 +215,7 @@ fn tts_tag_from_string<'a>(field_text: &'a str, args: &'a str) -> AVTag {
 
 pub fn strip_html_preserving_media_filenames(html: &str) -> Cow<str> {
     let without_fnames = HTML_MEDIA_TAGS.replace_all(html, r" ${1}${2}${3} ");
-    let without_html = HTML.replace_all(&without_fnames, "");
+    let without_html = strip_html(&without_fnames);
     // no changes?
     if let Cow::Borrowed(b) = without_html {
         if ptr::eq(b, html) {
@@ -224,6 +224,18 @@ pub fn strip_html_preserving_media_filenames(html: &str) -> Cow<str> {
     }
     // make borrow checker happy
     without_html.into_owned().into()
+}
+
+#[allow(dead_code)]
+pub(crate) fn sanitize_html(html: &str) -> String {
+    ammonia::clean(html)
+}
+
+pub(crate) fn sanitize_html_no_images(html: &str) -> String {
+    ammonia::Builder::default()
+        .rm_tags(&["img"])
+        .clean(html)
+        .to_string()
 }
 
 pub(crate) fn normalize_to_nfc(s: &str) -> Cow<str> {
@@ -323,12 +335,12 @@ pub(crate) fn to_text(txt: &str) -> Cow<str> {
     RE.replace_all(&txt, "$1")
 }
 
-/// Escape characters special to SQL: \%_
-pub(crate) fn escape_sql(txt: &str) -> Cow<str> {
+/// Escape Anki wildcards and the backslash for escaping them: \*_
+pub(crate) fn escape_anki_wildcards(txt: &str) -> String {
     lazy_static! {
-        static ref RE: Regex = Regex::new(r"[\\%_]").unwrap();
+        static ref RE: Regex = Regex::new(r"[\\*_]").unwrap();
     }
-    RE.replace_all(&txt, r"\$0")
+    RE.replace_all(&txt, r"\$0").into()
 }
 
 /// Compare text with a possible glob, folding case.
@@ -399,7 +411,6 @@ mod test {
         assert_eq!(&to_custom_re("f_o*", r"\d"), r"f\do\d*");
         assert_eq!(&to_sql("%f_o*"), r"\%f_o%");
         assert_eq!(&to_text(r"\*\_*_"), "*_*_");
-        assert_eq!(&escape_sql(r"1\2%3_"), r"1\\2\%3\_");
         assert!(is_glob(r"\\\\_"));
         assert!(!is_glob(r"\\\_"));
         assert!(matches_glob("foo*bar123", r"foo\*bar*"));

@@ -43,6 +43,7 @@ rust_library(
     ],
     crate_root = "src/lib.rs",
     crate_type = "lib",
+    data = [],
     edition = "2018",
     rustc_flags = [
         "--cap-lints=allow",
@@ -54,12 +55,12 @@ rust_library(
     version = "0.3.1",
     # buildifier: leave-alone
     deps = [
-        "@raze__native_tls__0_2_6//:native_tls",
-        "@raze__tokio__0_2_23//:tokio",
+        "@raze__native_tls__0_2_7//:native_tls",
+        "@raze__tokio__0_2_25//:tokio",
     ] + selects.with_or({
         # cfg(all(not(target_os = "macos"), not(windows), not(target_os = "ios")))
         (
-            "@io_bazel_rules_rust//rust/platform:i686-unknown-linux-gnu",
+            "@io_bazel_rules_rust//rust/platform:aarch64-unknown-linux-gnu",
             "@io_bazel_rules_rust//rust/platform:x86_64-unknown-linux-gnu",
         ): [
         ],
@@ -68,7 +69,6 @@ rust_library(
         # cfg(any(target_os = "macos", target_os = "ios"))
         (
             "@io_bazel_rules_rust//rust/platform:aarch64-apple-ios",
-            "@io_bazel_rules_rust//rust/platform:i686-apple-darwin",
             "@io_bazel_rules_rust//rust/platform:x86_64-apple-darwin",
             "@io_bazel_rules_rust//rust/platform:x86_64-apple-ios",
         ): [
@@ -77,7 +77,6 @@ rust_library(
     }) + selects.with_or({
         # cfg(windows)
         (
-            "@io_bazel_rules_rust//rust/platform:i686-pc-windows-msvc",
             "@io_bazel_rules_rust//rust/platform:x86_64-pc-windows-msvc",
         ): [
         ],

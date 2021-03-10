@@ -1,1 +1,2 @@
-call .\bazel.bat run //qt:runanki -k -- %*
+set PYTHONWARNINGS=default
+call .\bazel.bat run %BUILDARGS% //qt:runanki -k -- %*

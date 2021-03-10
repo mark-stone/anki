@@ -32,13 +32,15 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import anki
+import anki._backend.backend_pb2 as _pb
 from anki import hooks
 from anki.cards import Card
 from anki.decks import DeckManager
+from anki.errors import TemplateError
 from anki.models import NoteType
 from anki.notes import Note
-from anki.rsbackend import pb, to_json_bytes
 from anki.sound import AVTag, SoundOrVideoTag, TTSTag
+from anki.utils import to_json_bytes
 
 CARD_BLANK_HELP = (
     "https://anki.tenderapp.com/kb/card-appearance/the-front-of-this-card-is-blank"
@@ -61,7 +63,7 @@ class PartiallyRenderedCard:
     anodes: TemplateReplacementList
 
     @classmethod
-    def from_proto(cls, out: pb.RenderCardOut) -> PartiallyRenderedCard:
+    def from_proto(cls, out: _pb.RenderCardOut) -> PartiallyRenderedCard:
         qnodes = cls.nodes_from_proto(out.question_nodes)
         anodes = cls.nodes_from_proto(out.answer_nodes)
 
@@ -69,7 +71,7 @@ class PartiallyRenderedCard:
 
     @staticmethod
     def nodes_from_proto(
-        nodes: Sequence[pb.RenderedTemplateNode],
+        nodes: Sequence[_pb.RenderedTemplateNode],
     ) -> TemplateReplacementList:
         results: TemplateReplacementList = []
         for node in nodes:
@@ -86,7 +88,7 @@ class PartiallyRenderedCard:
         return results
 
 
-def av_tag_to_native(tag: pb.AVTag) -> AVTag:
+def av_tag_to_native(tag: _pb.AVTag) -> AVTag:
     val = tag.WhichOneof("value")
     if val == "sound_or_video":
         return SoundOrVideoTag(filename=tag.sound_or_video)
@@ -100,7 +102,7 @@ def av_tag_to_native(tag: pb.AVTag) -> AVTag:
         )
 
 
-def av_tags_to_native(tags: Sequence[pb.AVTag]) -> List[AVTag]:
+def av_tags_to_native(tags: Sequence[_pb.AVTag]) -> List[AVTag]:
     return list(map(av_tag_to_native, tags))
 
 
@@ -176,7 +178,7 @@ class TemplateRenderContext:
                 fields["Card"] = self._template["name"]
             else:
                 fields["Card"] = ""
-            flag = self._card.userFlag()
+            flag = self._card.user_flag()
             fields["CardFlag"] = flag and f"flag{flag}" or ""
             self._fields = fields
 
@@ -206,7 +208,7 @@ class TemplateRenderContext:
     def render(self) -> TemplateRenderOutput:
         try:
             partial = self._partially_render()
-        except anki.rsbackend.TemplateError as e:
+        except TemplateError as e:
             return TemplateRenderOutput(
                 question_text=str(e),
                 answer_text=str(e),
@@ -215,10 +217,10 @@ class TemplateRenderContext:
             )
 
         qtext = apply_custom_filters(partial.qnodes, self, front_side=None)
-        qout = self.col().backend.extract_av_tags(text=qtext, question_side=True)
+        qout = self.col()._backend.extract_av_tags(text=qtext, question_side=True)
 
         atext = apply_custom_filters(partial.anodes, self, front_side=qout.text)
-        aout = self.col().backend.extract_av_tags(text=atext, question_side=False)
+        aout = self.col()._backend.extract_av_tags(text=atext, question_side=False)
 
         output = TemplateRenderOutput(
             question_text=qout.text,
@@ -236,15 +238,15 @@ class TemplateRenderContext:
     def _partially_render(self) -> PartiallyRenderedCard:
         if self._template:
             # card layout screen
-            out = self._col.backend.render_uncommitted_card(
-                note=self._note.to_backend_note(),
+            out = self._col._backend.render_uncommitted_card(
+                note=self._note._to_backend_note(),
                 card_ord=self._card.ord,
                 template=to_json_bytes(self._template),
                 fill_empty=self._fill_empty,
             )
         else:
             # existing card (eg study mode)
-            out = self._col.backend.render_existing_card(
+            out = self._col._backend.render_existing_card(
                 card_id=self._card.id, browser=self._browser
             )
         return PartiallyRenderedCard.from_proto(out)
@@ -304,7 +306,7 @@ def apply_custom_filters(
                 )
                 # legacy hook - the second and fifth argument are no longer used.
                 field_text = anki.hooks.runFilter(
-                    "fmod_" + filter_name,
+                    f"fmod_{filter_name}",
                     field_text,
                     "",
                     ctx.note().items(),

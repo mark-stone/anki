@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-# some add-ons expect json to be in the utils module
-import json  # pylint: disable=unused-import
-import locale
+import json as _json
 import os
 import platform
 import random
@@ -20,11 +18,31 @@ import traceback
 from contextlib import contextmanager
 from hashlib import sha1
 from html.entities import name2codepoint
-from typing import Iterable, Iterator, List, Optional, Union
+from typing import Any, Iterable, Iterator, List, Match, Optional, Union
 
 from anki.dbproxy import DBProxy
 
 _tmpdir: Optional[str]
+
+try:
+    # pylint: disable=c-extension-no-member
+    import orjson
+
+    to_json_bytes = orjson.dumps
+    from_json_bytes = orjson.loads
+except:
+    print("orjson is missing; DB operations will be slower")
+    to_json_bytes = lambda obj: _json.dumps(obj).encode("utf8")  # type: ignore
+    from_json_bytes = _json.loads
+
+
+def __getattr__(name: str) -> Any:
+    if name == "json":
+        traceback.print_stack(file=sys.stdout)
+        print("add-on should import json directly, not from anki.utils")
+        return _json
+    raise AttributeError(f"module {__name__} has no attribute {name}")
+
 
 # Time handling
 ##############################################################################
@@ -33,22 +51,6 @@ _tmpdir: Optional[str]
 def intTime(scale: int = 1) -> int:
     "The time in integer seconds. Pass scale=1000 to get milliseconds."
     return int(time.time() * scale)
-
-
-# Locale
-##############################################################################
-
-
-def fmtPercentage(float_value, point=1) -> str:
-    "Return float with percentage sign"
-    fmt = "%" + "0.%(b)df" % {"b": point}
-    return locale.format_string(fmt, float_value) + "%"
-
-
-def fmtFloat(float_value, point=1) -> str:
-    "Return a string with decimal separator according to current locale"
-    fmt = "%" + "0.%(b)df" % {"b": point}
-    return locale.format_string(fmt, float_value)
 
 
 # HTML
@@ -103,7 +105,7 @@ def entsToTxt(html: str) -> str:
     # replace it first
     html = html.replace("&nbsp;", " ")
 
-    def fixup(m):
+    def fixup(m: Match) -> str:
         text = m.group(0)
         if text[:2] == "&#":
             # character reference
@@ -129,14 +131,6 @@ def entsToTxt(html: str) -> str:
 ##############################################################################
 
 
-def hexifyID(id) -> str:
-    return "%x" % int(id)
-
-
-def dehexifyID(id) -> int:
-    return int(id, 16)
-
-
 def ids2str(ids: Iterable[Union[int, str]]) -> str:
     """Given a list of integers, return a string '(int1,int2,...)'."""
     return "(%s)" % ",".join(str(i) for i in ids)
@@ -147,7 +141,7 @@ def timestampID(db: DBProxy, table: str) -> int:
     # be careful not to create multiple objects without flushing them, or they
     # may share an ID.
     t = intTime(1000)
-    while db.scalar("select id from %s where id = ?" % table, t):
+    while db.scalar(f"select id from {table} where id = ?", t):
         t += 1
     return t
 
@@ -156,7 +150,7 @@ def maxID(db: DBProxy) -> int:
     "Return the first safe ID to use."
     now = intTime(1000)
     for tbl in "cards", "notes":
-        now = max(now, db.scalar("select max(id) from %s" % tbl) or 0)
+        now = max(now, db.scalar(f"select max(id) from {tbl}") or 0)
     return now + 1
 
 
@@ -182,23 +176,6 @@ def base91(num: int) -> str:
 def guid64() -> str:
     "Return a base91-encoded 64bit random number."
     return base91(random.randint(0, 2 ** 64 - 1))
-
-
-# increment a guid by one, for note type conflicts
-def incGuid(guid) -> str:
-    return _incGuid(guid[::-1])[::-1]
-
-
-def _incGuid(guid) -> str:
-    s = string
-    table = s.ascii_letters + s.digits + _base91_extra_chars
-    idx = table.index(guid[0])
-    if idx + 1 == len(table):
-        # overflow
-        guid = table[0] + _incGuid(guid[1:])
-    else:
-        guid = table[idx + 1] + guid[1:]
-    return guid
 
 
 # Fields
@@ -239,7 +216,7 @@ def tmpdir() -> str:
     global _tmpdir
     if not _tmpdir:
 
-        def cleanup():
+        def cleanup() -> None:
             if os.path.exists(_tmpdir):
                 shutil.rmtree(_tmpdir)
 
@@ -266,7 +243,7 @@ def namedtmp(name: str, rm: bool = True) -> str:
     if rm:
         try:
             os.unlink(path)
-        except (OSError, IOError):
+        except OSError:
             pass
     return path
 
@@ -283,7 +260,7 @@ def noBundledLibs() -> Iterator[None]:
         os.environ["LD_LIBRARY_PATH"] = oldlpath
 
 
-def call(argv: List[str], wait: bool = True, **kwargs) -> int:
+def call(argv: List[str], wait: bool = True, **kwargs: Any) -> int:
     "Execute a command. If WAIT, return exit code."
     # ensure we don't open a separate window for forking process on windows
     if isWin:
@@ -327,7 +304,7 @@ devMode = os.getenv("ANKIDEV", "")
 invalidFilenameChars = ':*?"<>|'
 
 
-def invalidFilename(str, dirsep=True) -> Optional[str]:
+def invalidFilename(str: str, dirsep: bool = True) -> Optional[str]:
     for c in invalidFilenameChars:
         if c in str:
             return c
@@ -349,14 +326,14 @@ def platDesc() -> str:
         try:
             system = platform.system()
             if isMac:
-                theos = "mac:%s" % (platform.mac_ver()[0])
+                theos = f"mac:{platform.mac_ver()[0]}"
             elif isWin:
-                theos = "win:%s" % (platform.win32_ver()[0])
+                theos = f"win:{platform.win32_ver()[0]}"
             elif system == "Linux":
                 import distro  # pytype: disable=import-error # pylint: disable=import-error
 
                 r = distro.linux_distribution(full_distribution_name=False)
-                theos = "lin:%s:%s" % (r[0], r[1])
+                theos = f"lin:{r[0]}:{r[1]}"
             else:
                 theos = system
             break
@@ -373,7 +350,7 @@ class TimedLog:
     def __init__(self) -> None:
         self._last = time.time()
 
-    def log(self, s) -> None:
+    def log(self, s: str) -> None:
         path, num, fn, y = traceback.extract_stack(limit=2)[0]
         sys.stderr.write(
             "%5dms: %s(): %s\n" % ((time.time() - self._last) * 1000, fn, s)
@@ -388,7 +365,7 @@ class TimedLog:
 def versionWithBuild() -> str:
     from anki.buildinfo import buildhash, version
 
-    return "%s (%s)" % (version, buildhash)
+    return f"{version} ({buildhash})"
 
 
 def pointVersion() -> int:

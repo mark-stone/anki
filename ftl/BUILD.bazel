@@ -1,7 +1,8 @@
 load("@py_deps//:requirements.bzl", "requirement")
 
 fluent_syntax = [
-    requirement("fluent-syntax"),
+    requirement("fluent.syntax"),
+    requirement("compare-locales"),
     # undeclared runtime dependency
     requirement("six"),
 ]
@@ -49,6 +50,13 @@ py_binary(
 py_binary(
     name = "transform-string",
     srcs = ["transform-string.py"],
+    tags = ["manual"],
+    deps = fluent_syntax,
+)
+
+py_binary(
+    name = "duplicate-string",
+    srcs = ["duplicate-string.py"],
     tags = ["manual"],
     deps = fluent_syntax,
 )

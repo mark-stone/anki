@@ -1,16 +1,23 @@
 <script lang="typescript">
+    import { createEventDispatcher } from "svelte";
     import NoDataOverlay from "./NoDataOverlay.svelte";
     import AxisTicks from "./AxisTicks.svelte";
     import { defaultGraphBounds, RevlogRange } from "./graph-helpers";
+    import type { SearchEventMap } from "./graph-helpers";
     import { gatherData, renderCalendar } from "./calendar";
+    import type { PreferenceStore } from "./preferences";
     import type { GraphData } from "./calendar";
     import type pb from "anki/backend_proto";
     import type { I18n } from "anki/i18n";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
+    export let preferences: PreferenceStore | null = null;
     export let revlogRange: RevlogRange;
     export let i18n: I18n;
     export let nightMode: boolean;
+
+    let { calendarFirstDayOfWeek } = preferences;
+    const dispatch = createEventDispatcher<SearchEventMap>();
 
     let graphData: GraphData | null = null;
 
@@ -25,7 +32,7 @@
     let targetYear = maxYear;
 
     $: if (sourceData) {
-        graphData = gatherData(sourceData);
+        graphData = gatherData(sourceData, $calendarFirstDayOfWeek);
     }
 
     $: {
@@ -46,10 +53,12 @@
             svg as SVGElement,
             bounds,
             graphData,
+            dispatch,
             targetYear,
             i18n,
             nightMode,
-            revlogRange
+            revlogRange,
+            calendarFirstDayOfWeek.set
         );
     }
 
@@ -74,6 +83,7 @@
     </div>
 
     <svg bind:this={svg} viewBox={`0 0 ${bounds.width} ${bounds.height}`}>
+        <g class="weekdays" />
         <g class="days" />
         <AxisTicks {bounds} />
         <NoDataOverlay {bounds} {i18n} />

@@ -18,6 +18,22 @@ use crate::{
 };
 
 impl Card {
+    pub(crate) fn restore_queue_from_type(&mut self) {
+        self.queue = match self.ctype {
+            CardType::Learn | CardType::Relearn => {
+                if self.due > 1_000_000_000 {
+                    // unix timestamp
+                    CardQueue::Learn
+                } else {
+                    // day number
+                    CardQueue::DayLearn
+                }
+            }
+            CardType::New => CardQueue::New,
+            CardType::Review => CardQueue::Review,
+        }
+    }
+
     pub(crate) fn move_into_filtered_deck(&mut self, ctx: &DeckFilterContext, position: i32) {
         // filtered and v1 learning cards are excluded, so odue should be guaranteed to be zero
         if self.original_due != 0 {
@@ -64,6 +80,14 @@ impl Card {
         }
     }
 
+    pub(crate) fn original_or_current_deck_id(&self) -> DeckID {
+        if self.original_deck_id.0 > 0 {
+            self.original_deck_id
+        } else {
+            self.deck_id
+        }
+    }
+
     pub(crate) fn remove_from_filtered_deck_restoring_queue(&mut self, sched: SchedulerVersion) {
         if self.original_deck_id.0 == 0 {
             // not in a filtered deck
@@ -97,19 +121,7 @@ impl Card {
                 }
 
                 if (self.queue as i8) >= 0 {
-                    self.queue = match self.ctype {
-                        CardType::Learn | CardType::Relearn => {
-                            if self.due > 1_000_000_000 {
-                                // unix timestamp
-                                CardQueue::Learn
-                            } else {
-                                // day number
-                                CardQueue::DayLearn
-                            }
-                        }
-                        CardType::New => CardQueue::New,
-                        CardType::Review => CardQueue::Review,
-                    }
+                    self.restore_queue_from_type();
                 }
             }
         }
@@ -133,7 +145,11 @@ impl Deck {
             name: "".into(),
             mtime_secs: TimestampSecs(0),
             usn: Usn(0),
-            common: DeckCommon::default(),
+            common: DeckCommon {
+                study_collapsed: true,
+                browser_collapsed: true,
+                ..Default::default()
+            },
             kind: DeckKind::Filtered(filt),
         }
     }
@@ -162,13 +178,13 @@ impl Collection {
 
     // Unlike the old Python code, this also marks the cards as modified.
     fn return_cards_to_home_deck(&mut self, cids: &[CardID]) -> Result<()> {
-        let sched = self.sched_ver();
+        let sched = self.scheduler_version();
         let usn = self.usn()?;
         for cid in cids {
             if let Some(mut card) = self.storage.get_card(*cid)? {
                 let original = card.clone();
                 card.remove_from_filtered_deck_restoring_queue(sched);
-                self.update_card(&mut card, &original, usn)?;
+                self.update_card_inner(&mut card, &original, usn)?;
             }
         }
         Ok(())
@@ -185,7 +201,7 @@ impl Collection {
         let ctx = DeckFilterContext {
             target_deck: did,
             config,
-            scheduler: self.sched_ver(),
+            scheduler: self.scheduler_version(),
             usn: self.usn()?,
             today: self.timing_today()?.days_elapsed,
         };
@@ -230,10 +246,10 @@ impl Collection {
         let order = order_and_limit_for_search(term, ctx.today);
 
         self.search_cards_into_table(&search, SortMode::Custom(order))?;
-        for mut card in self.storage.all_searched_cards()? {
+        for mut card in self.storage.all_searched_cards_in_search_order()? {
             let original = card.clone();
             card.move_into_filtered_deck(ctx, position);
-            self.update_card(&mut card, &original, ctx.usn)?;
+            self.update_card_inner(&mut card, &original, ctx.usn)?;
             position += 1;
         }
 

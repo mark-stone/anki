@@ -1,21 +1,22 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from concurrent.futures import Future
 from operator import itemgetter
 from typing import Any, List, Optional, Sequence
 
 import aqt.clayout
 from anki import stdmodels
-from anki.backend_pb2 import NoteTypeNameIDUseCount
 from anki.lang import without_unicode_isolation
-from anki.models import NoteType
+from anki.models import NoteType, NoteTypeNameIDUseCount
 from anki.notes import Note
-from anki.rsbackend import pb
 from aqt import AnkiQt, gui_hooks
 from aqt.qt import *
 from aqt.utils import (
     TR,
+    HelpPage,
     askUser,
+    disable_help_button,
     getText,
     maybeHideClose,
     openHelp,
@@ -27,10 +28,17 @@ from aqt.utils import (
 
 
 class Models(QDialog):
-    def __init__(self, mw: AnkiQt, parent=None, fromMain=False):
+    def __init__(
+        self,
+        mw: AnkiQt,
+        parent: Optional[QDialog] = None,
+        fromMain: bool = False,
+        selected_notetype_id: Optional[int] = None,
+    ):
         self.mw = mw
         parent = parent or mw
         self.fromMain = fromMain
+        self.selected_notetype_id = selected_notetype_id
         QDialog.__init__(self, parent, Qt.Window)
         self.col = mw.col.weakref()
         assert self.col
@@ -40,15 +48,24 @@ class Models(QDialog):
         self.form.setupUi(self)
         qconnect(
             self.form.buttonBox.helpRequested,
-            lambda: openHelp("editing?id=adding-a-note-type"),
+            lambda: openHelp(HelpPage.ADDING_A_NOTE_TYPE),
         )
-        self.models: List[pb.NoteTypeNameIDUseCount] = []
+        self.models: List[NoteTypeNameIDUseCount] = []
         self.setupModels()
         restoreGeom(self, "models")
         self.exec_()
 
     # Models
     ##########################################################################
+
+    def maybe_select_provided_notetype(self) -> None:
+        if not self.selected_notetype_id:
+            self.form.modelsList.setCurrentRow(0)
+            return
+        for i, m in enumerate(self.models):
+            if m.id == self.selected_notetype_id:
+                self.form.modelsList.setCurrentRow(i)
+                break
 
     def setupModels(self) -> None:
         self.model = None
@@ -77,11 +94,11 @@ class Models(QDialog):
 
         qconnect(f.modelsList.itemDoubleClicked, self.onRename)
 
-        def on_done(fut) -> None:
+        def on_done(fut: Future) -> None:
             self.updateModelsList(fut.result())
+            self.maybe_select_provided_notetype()
 
         self.mw.taskman.with_progress(self.col.models.all_use_counts, on_done, self)
-        f.modelsList.setCurrentRow(0)
         maybeHideClose(box)
 
     def onRename(self) -> None:
@@ -93,11 +110,11 @@ class Models(QDialog):
             self.saveAndRefresh(nt)
 
     def saveAndRefresh(self, nt: NoteType) -> None:
-        def save() -> Sequence[pb.NoteTypeNameIDUseCount]:
+        def save() -> Sequence[NoteTypeNameIDUseCount]:
             self.mm.save(nt)
             return self.col.models.all_use_counts()
 
-        def on_done(fut) -> None:
+        def on_done(fut: Future) -> None:
             self.updateModelsList(fut.result())
 
         self.mw.taskman.with_progress(save, on_done, self)
@@ -111,7 +128,7 @@ class Models(QDialog):
         self.models = notetypes
         for m in self.models:
             mUse = tr(TR.BROWSING_NOTE_COUNT, count=m.use_count)
-            item = QListWidgetItem("%s [%s]" % (m.name, mUse))
+            item = QListWidgetItem(f"{m.name} [{mUse}]")
             self.form.modelsList.addItem(item)
         self.form.modelsList.setCurrentRow(row)
 
@@ -143,11 +160,11 @@ class Models(QDialog):
 
         nt = self.current_notetype()
 
-        def save() -> Sequence[pb.NoteTypeNameIDUseCount]:
+        def save() -> Sequence[NoteTypeNameIDUseCount]:
             self.mm.rem(nt)
             return self.col.models.all_use_counts()
 
-        def on_done(fut) -> None:
+        def on_done(fut: Future) -> None:
             self.updateModelsList(fut.result())
 
         self.mw.taskman.with_progress(save, on_done, self)
@@ -155,6 +172,7 @@ class Models(QDialog):
     def onAdvanced(self) -> None:
         nt = self.current_notetype()
         d = QDialog(self)
+        disable_help_button(d)
         frm = aqt.forms.modelopts.Ui_Dialog()
         frm.setupUi(d)
         frm.latexsvg.setChecked(nt.get("latexsvg", False))
@@ -163,7 +181,7 @@ class Models(QDialog):
         d.setWindowTitle(
             without_unicode_isolation(tr(TR.ACTIONS_OPTIONS_FOR, val=nt["name"]))
         )
-        qconnect(frm.buttonBox.helpRequested, lambda: openHelp("math?id=latex"))
+        qconnect(frm.buttonBox.helpRequested, lambda: openHelp(HelpPage.LATEX))
         restoreGeom(d, "modelopts")
         gui_hooks.models_advanced_will_show(d)
         d.exec_()
@@ -202,7 +220,7 @@ class Models(QDialog):
 class AddModel(QDialog):
     model: Optional[NoteType]
 
-    def __init__(self, mw: AnkiQt, parent: Optional[QWidget] = None):
+    def __init__(self, mw: AnkiQt, parent: Optional[QWidget] = None) -> None:
         self.parent_ = parent or mw
         self.mw = mw
         self.col = mw.col
@@ -210,6 +228,7 @@ class AddModel(QDialog):
         self.model = None
         self.dialog = aqt.forms.addmodel.Ui_Dialog()
         self.dialog.setupUi(self)
+        disable_help_button(self)
         # standard models
         self.models = []
         for (name, func) in stdmodels.get_stock_notetypes(self.col):
@@ -247,4 +266,4 @@ class AddModel(QDialog):
         QDialog.accept(self)
 
     def onHelp(self) -> None:
-        openHelp("editing?id=adding-a-note-type")
+        openHelp(HelpPage.ADDING_A_NOTE_TYPE)

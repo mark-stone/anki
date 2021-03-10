@@ -3,23 +3,28 @@
 
 use super::NoteTypeKind;
 use crate::{
-    config::ConfigKey, err::Result, i18n::I18n, i18n::TR, notetype::NoteType,
-    storage::SqliteStorage, timestamp::TimestampSecs,
+    config::{ConfigEntry, ConfigKey},
+    err::Result,
+    i18n::I18n,
+    i18n::TR,
+    notetype::NoteType,
+    storage::SqliteStorage,
+    timestamp::TimestampSecs,
 };
 
-pub use crate::backend_proto::StockNoteType;
+use crate::backend_proto::stock_note_type::Kind;
 
 impl SqliteStorage {
     pub(crate) fn add_stock_notetypes(&self, i18n: &I18n) -> Result<()> {
         for (idx, mut nt) in all_stock_notetypes(i18n).into_iter().enumerate() {
             self.add_new_notetype(&mut nt)?;
-            if idx == StockNoteType::Basic as usize {
-                self.set_config_value(
+            if idx == Kind::Basic as usize {
+                self.set_config_entry(&ConfigEntry::boxed(
                     ConfigKey::CurrentNoteTypeID.into(),
-                    &nt.id,
+                    serde_json::to_vec(&nt.id)?,
                     self.usn(false)?,
                     TimestampSecs::now(),
-                )?;
+                ))?;
             }
         }
         Ok(())
@@ -43,8 +48,10 @@ fn fieldref<S: AsRef<str>>(name: S) -> String {
 }
 
 pub(crate) fn basic(i18n: &I18n) -> NoteType {
-    let mut nt = NoteType::default();
-    nt.name = i18n.tr(TR::NotetypesBasicName).into();
+    let mut nt = NoteType {
+        name: i18n.tr(TR::NotetypesBasicName).into(),
+        ..Default::default()
+    };
     let front = i18n.tr(TR::NotetypesFrontField);
     let back = i18n.tr(TR::NotetypesBackField);
     nt.add_field(front.as_ref());
@@ -108,8 +115,10 @@ pub(crate) fn basic_optional_reverse(i18n: &I18n) -> NoteType {
 }
 
 pub(crate) fn cloze(i18n: &I18n) -> NoteType {
-    let mut nt = NoteType::default();
-    nt.name = i18n.tr(TR::NotetypesClozeName).into();
+    let mut nt = NoteType {
+        name: i18n.tr(TR::NotetypesClozeName).into(),
+        ..Default::default()
+    };
     let text = i18n.tr(TR::NotetypesTextField);
     nt.add_field(text.as_ref());
     let back_extra = i18n.tr(TR::NotetypesBackExtraField);

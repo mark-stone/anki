@@ -14,10 +14,7 @@ use crate::{
 };
 use itertools::Itertools;
 use slog::debug;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 #[derive(Debug, Default, PartialEq)]
 pub struct CheckDatabaseOutput {
@@ -200,12 +197,7 @@ impl Collection {
     }
 
     fn check_filtered_cards(&mut self, out: &mut CheckDatabaseOutput) -> Result<()> {
-        let decks: HashMap<_, _> = self
-            .storage
-            .get_all_decks()?
-            .into_iter()
-            .map(|d| (d.id, d))
-            .collect();
+        let decks = self.storage.get_decks_map()?;
 
         let mut wrong = 0;
         for (cid, did) in self.storage.all_filtered_cards_by_deck()? {
@@ -238,12 +230,12 @@ impl Collection {
         F: FnMut(DatabaseCheckProgress, bool),
     {
         let nids_by_notetype = self.storage.all_note_ids_by_notetype()?;
-        let norm = self.normalize_note_text();
+        let norm = self.get_bool(BoolKey::NormalizeNoteText);
         let usn = self.usn()?;
         let stamp = TimestampMillis::now();
 
-        // will rebuild tag list below
-        self.storage.clear_tags()?;
+        let expanded_tags = self.storage.expanded_tags()?;
+        self.storage.clear_all_tags()?;
 
         let total_notes = self.storage.total_notes()?;
         let mut checked_notes = 0;
@@ -255,7 +247,7 @@ impl Collection {
                 None => {
                     let first_note = self.storage.get_note(group.peek().unwrap().1)?.unwrap();
                     out.notetypes_recovered += 1;
-                    self.recover_notetype(stamp, first_note.fields.len(), ntid)?
+                    self.recover_notetype(stamp, first_note.fields().len(), ntid)?
                 }
                 Some(nt) => nt,
             };
@@ -272,6 +264,7 @@ impl Collection {
                 checked_notes += 1;
 
                 let mut note = self.get_note_fixing_invalid_utf8(nid, out)?;
+                let original = note.clone();
 
                 let cards = self.storage.existing_cards_for_note(nid)?;
 
@@ -279,7 +272,7 @@ impl Collection {
                 out.templates_missing += self.remove_cards_without_template(&nt, &cards)?;
 
                 // fix fields
-                if note.fields.len() != nt.fields.len() {
+                if note.fields().len() != nt.fields.len() {
                     note.fix_field_count(&nt);
                     note.tags.push("db-check".into());
                     out.field_count_mismatch += 1;
@@ -290,9 +283,13 @@ impl Collection {
 
                 // write note, updating tags and generating missing cards
                 let ctx = genctx.get_or_insert_with(|| CardGenContext::new(&nt, usn));
-                self.update_note_inner_generating_cards(&ctx, &mut note, false, norm)?;
+                self.update_note_inner_generating_cards(&ctx, &mut note, &original, false, norm)?;
             }
         }
+
+        // the note rebuilding process took care of adding tags back, so we just need
+        // to ensure to restore the collapse state
+        self.storage.restore_expanded_tags(&expanded_tags)?;
 
         // if the collection is empty and the user has deleted all note types, ensure at least
         // one note type exists
@@ -412,7 +409,7 @@ impl Collection {
         Ok(())
     }
 
-    fn update_next_new_position(&self) -> Result<()> {
+    fn update_next_new_position(&mut self) -> Result<()> {
         let pos = self.storage.max_new_card_position().unwrap_or(0);
         self.set_next_card_position(pos)
     }
@@ -579,7 +576,7 @@ mod test {
             }
         );
         let note = col.storage.get_note(note.id)?.unwrap();
-        assert_eq!(&note.fields, &["a", "b; c; d"]);
+        assert_eq!(&note.fields()[..], &["a", "b; c; d"]);
 
         // missing fields get filled with blanks
         col.storage
@@ -594,7 +591,7 @@ mod test {
             }
         );
         let note = col.storage.get_note(note.id)?.unwrap();
-        assert_eq!(&note.fields, &["a", ""]);
+        assert_eq!(&note.fields()[..], &["a", ""]);
 
         Ok(())
     }
@@ -629,6 +626,25 @@ mod test {
                 .collect::<Vec<_>>(),
             &["Default", "foo", "foo::bar", "foo::bar::baz"]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn tags() -> Result<()> {
+        let mut col = open_test_collection();
+        let nt = col.get_notetype_by_name("Basic")?.unwrap();
+        let mut note = nt.new_note();
+        note.tags.push("one".into());
+        note.tags.push("two".into());
+        col.add_note(&mut note, DeckID(1))?;
+
+        col.set_tag_expanded("one", true)?;
+
+        col.check_database(progress_fn)?;
+
+        assert_eq!(col.storage.get_tag("one")?.unwrap().expanded, true);
+        assert_eq!(col.storage.get_tag("two")?.unwrap().expanded, false);
 
         Ok(())
     }

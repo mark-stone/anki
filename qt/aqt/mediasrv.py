@@ -1,5 +1,4 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ import threading
 import time
 import traceback
 from http import HTTPStatus
+from typing import Tuple
 
 import flask
 import flask_cors  # type: ignore
@@ -20,20 +20,20 @@ from waitress.server import create_server
 
 import aqt
 from anki import hooks
-from anki.rsbackend import from_json_bytes
-from anki.utils import devMode
+from anki.collection import GraphPreferences
+from anki.utils import devMode, from_json_bytes
 from aqt.qt import *
 from aqt.utils import aqt_data_folder
 
 
-def _getExportFolder():
+def _getExportFolder() -> str:
     data_folder = aqt_data_folder()
     webInSrcFolder = os.path.abspath(os.path.join(data_folder, "web"))
     if os.path.exists(webInSrcFolder):
         return webInSrcFolder
     elif isMac:
         dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.abspath(dir + "/../../Resources/web")
+        return os.path.abspath(f"{dir}/../../Resources/web")
     else:
         if os.environ.get("TEST_TARGET"):
             # running tests in bazel; we have no data
@@ -52,11 +52,11 @@ class MediaServer(threading.Thread):
     _ready = threading.Event()
     daemon = True
 
-    def __init__(self, mw: aqt.main.AnkiQt, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, mw: aqt.main.AnkiQt) -> None:
+        super().__init__()
         self.is_shutdown = False
 
-    def run(self):
+    def run(self) -> None:
         try:
             if devMode:
                 # idempotent if logging has already been set up
@@ -64,7 +64,12 @@ class MediaServer(threading.Thread):
             logging.getLogger("waitress").setLevel(logging.ERROR)
 
             desired_port = int(os.getenv("ANKI_API_PORT", "0"))
-            self.server = create_server(app, host="127.0.0.1", port=desired_port)
+            self.server = create_server(
+                app,
+                host="127.0.0.1",
+                port=desired_port,
+                clear_untrusted_proxy_headers=True,
+            )
             if devMode:
                 print(
                     "Serving on http://%s:%s"
@@ -78,7 +83,7 @@ class MediaServer(threading.Thread):
             if not self.is_shutdown:
                 raise
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self.is_shutdown = True
         sockets = list(self.server._map.values())  # type: ignore
         for socket in sockets:
@@ -86,13 +91,13 @@ class MediaServer(threading.Thread):
         # https://github.com/Pylons/webtest/blob/4b8a3ebf984185ff4fefb31b4d0cf82682e1fcf7/webtest/http.py#L93-L104
         self.server.task_dispatcher.shutdown()
 
-    def getPort(self):
+    def getPort(self) -> int:
         self._ready.wait()
         return int(self.server.effective_port)  # type: ignore
 
 
 @app.route("/<path:pathin>", methods=["GET", "POST"])
-def allroutes(pathin):
+def allroutes(pathin: str) -> Response:
     try:
         directory, path = _redirectWebExports(pathin)
     except TypeError:
@@ -105,7 +110,7 @@ def allroutes(pathin):
         isdir = os.path.isdir(os.path.join(directory, path))
     except ValueError:
         return flask.make_response(
-            "Path for '%s - %s' is too long!" % (directory, path),
+            f"Path for '{directory} - {path}' is too long!",
             HTTPStatus.BAD_REQUEST,
         )
 
@@ -116,13 +121,13 @@ def allroutes(pathin):
     # protect against directory transversal: https://security.openstack.org/guidelines/dg_using-file-paths.html
     if not fullpath.startswith(directory):
         return flask.make_response(
-            "Path for '%s - %s' is a security leak!" % (directory, path),
+            f"Path for '{directory} - {path}' is a security leak!",
             HTTPStatus.FORBIDDEN,
         )
 
     if isdir:
         return flask.make_response(
-            "Path for '%s - %s' is a directory (not supported)!" % (directory, path),
+            f"Path for '{directory} - {path}' is a directory (not supported)!",
             HTTPStatus.FORBIDDEN,
         )
 
@@ -166,7 +171,7 @@ def allroutes(pathin):
         )
 
 
-def _redirectWebExports(path):
+def _redirectWebExports(path: str) -> Tuple[str, str]:
     # catch /_anki references and rewrite them to web export folder
     targetPath = "_anki/"
     if path.startswith(targetPath):
@@ -181,14 +186,29 @@ def _redirectWebExports(path):
                 addprefix = "css/"
             elif ext == ".js":
                 if base in ("browsersel", "jquery-ui", "jquery", "plot"):
-                    addprefix = "js/js/vendor/"
+                    addprefix = "js/vendor/"
                 else:
                     addprefix = "js/"
 
-            if addprefix:
-                oldpath = path
-                path = f"{targetPath}{addprefix}{filename}"
-                print(f"legacy {oldpath} remapped to {path}")
+        elif dirname == "_anki/js/vendor":
+            base, ext = os.path.splitext(filename)
+
+            if base == "jquery":
+                base = "jquery.min"
+                addprefix = "js/vendor/"
+
+            elif base == "jquery-ui":
+                base = "jquery-ui.min"
+                addprefix = "js/vendor/"
+
+            elif base == "browsersel":
+                base = "css_browser_selector.min"
+                addprefix = "js/vendor/"
+
+        if addprefix:
+            oldpath = path
+            path = f"{targetPath}{addprefix}{base}{ext}"
+            print(f"legacy {oldpath} remapped to {path}")
 
         return _exportFolder, path[len(targetPath) :]
 
@@ -201,7 +221,7 @@ def _redirectWebExports(path):
             addMgr = aqt.mw.addonManager
         except AttributeError as error:
             if devMode:
-                print("_redirectWebExports: %s" % error)
+                print(f"_redirectWebExports: {error}")
             return None
 
         try:
@@ -232,20 +252,31 @@ def _redirectWebExports(path):
 
 def graph_data() -> bytes:
     args = from_json_bytes(request.data)
-    return aqt.mw.col.backend.graphs(search=args["search"], days=args["days"])
+    return aqt.mw.col.graph_data(search=args["search"], days=args["days"])
+
+
+def graph_preferences() -> bytes:
+    return aqt.mw.col.get_graph_preferences()
+
+
+def set_graph_preferences() -> None:
+    prefs = GraphPreferences()
+    prefs.ParseFromString(request.data)
+    aqt.mw.col.set_graph_preferences(prefs)
 
 
 def congrats_info() -> bytes:
-    info = aqt.mw.col.backend.congrats_info()
-    return info.SerializeToString()
+    return aqt.mw.col.congrats_info()
 
 
-post_handlers = dict(
-    graphData=graph_data,
+post_handlers = {
+    "graphData": graph_data,
+    "graphPreferences": graph_preferences,
+    "setGraphPreferences": set_graph_preferences,
     # pylint: disable=unnecessary-lambda
-    i18nResources=lambda: aqt.mw.col.backend.i18n_resources(),
-    congratsInfo=congrats_info,
-)
+    "i18nResources": lambda: aqt.mw.col.i18n_resources(),
+    "congratsInfo": congrats_info,
+}
 
 
 def handle_post(path: str) -> Response:
@@ -254,12 +285,18 @@ def handle_post(path: str) -> Response:
         return flask.make_response("Collection not open", HTTPStatus.NOT_FOUND)
 
     if path in post_handlers:
-        data = post_handlers[path]()
-        response = flask.make_response(data)
-        response.headers["Content-Type"] = "application/binary"
-        return response
+        try:
+            if data := post_handlers[path]():
+                response = flask.make_response(data)
+                response.headers["Content-Type"] = "application/binary"
+            else:
+                response = flask.make_response("", HTTPStatus.NO_CONTENT)
+        except Exception as e:
+            return flask.make_response(str(e), HTTPStatus.INTERNAL_SERVER_ERROR)
     else:
-        return flask.make_response(
+        response = flask.make_response(
             f"Unhandled post to {path}",
             HTTPStatus.FORBIDDEN,
         )
+
+    return response

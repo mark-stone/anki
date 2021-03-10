@@ -4,9 +4,10 @@
 import json
 import re
 import time
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Tuple, Union
 
 from anki.cards import Card
+from anki.collection import Config
 from aqt import AnkiQt, gui_hooks
 from aqt.qt import (
     QAbstractItemView,
@@ -16,7 +17,9 @@ from aqt.qt import (
     QIcon,
     QKeySequence,
     QPixmap,
+    QShortcut,
     Qt,
+    QTimer,
     QVBoxLayout,
     QWidget,
     qconnect,
@@ -24,18 +27,22 @@ from aqt.qt import (
 from aqt.reviewer import replay_audio
 from aqt.sound import av_player, play_clicked_audio
 from aqt.theme import theme_manager
-from aqt.utils import TR, restoreGeom, saveGeom, tr
+from aqt.utils import TR, disable_help_button, restoreGeom, saveGeom, tr
 from aqt.webview import AnkiWebView
+
+LastStateAndMod = Tuple[str, int, int]
 
 
 class Previewer(QDialog):
-    _last_state = None
+    _last_state: Optional[LastStateAndMod] = None
     _card_changed = False
     _last_render: Union[int, float] = 0
-    _timer = None
+    _timer: Optional[QTimer] = None
     _show_both_sides = False
 
-    def __init__(self, parent: QWidget, mw: AnkiQt, on_close: Callable[[], None]):
+    def __init__(
+        self, parent: QWidget, mw: AnkiQt, on_close: Callable[[], None]
+    ) -> None:
         super().__init__(None, Qt.Window)
         self._open = True
         self._parent = parent
@@ -43,6 +50,7 @@ class Previewer(QDialog):
         self.mw = mw
         icon = QIcon()
         icon.addPixmap(QPixmap(":/icons/anki.png"), QIcon.Normal, QIcon.Off)
+        disable_help_button(self)
         self.setWindowIcon(icon)
 
     def card(self) -> Optional[Card]:
@@ -51,7 +59,7 @@ class Previewer(QDialog):
     def card_changed(self) -> bool:
         raise NotImplementedError
 
-    def open(self):
+    def open(self) -> None:
         self._state = "question"
         self._last_state = None
         self._create_gui()
@@ -59,8 +67,11 @@ class Previewer(QDialog):
         self.render_card()
         self.show()
 
-    def _create_gui(self):
+    def _create_gui(self) -> None:
         self.setWindowTitle(tr(TR.ACTIONS_PREVIEW))
+
+        self.close_shortcut = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
+        qconnect(self.close_shortcut.activated, self.close)
 
         qconnect(self.finished, self._on_finished)
         self.silentlyClose = True
@@ -82,7 +93,9 @@ class Previewer(QDialog):
         both_sides_button.setShortcut(QKeySequence("B"))
         both_sides_button.setToolTip(tr(TR.ACTIONS_SHORTCUT_KEY, val="B"))
         self.bbox.addButton(both_sides_button, QDialogButtonBox.ActionRole)
-        self._show_both_sides = self.mw.col.conf.get("previewBothSides", False)
+        self._show_both_sides = self.mw.col.get_config_bool(
+            Config.Bool.PREVIEW_BOTH_SIDES
+        )
         both_sides_button.setChecked(self._show_both_sides)
         qconnect(both_sides_button.toggled, self._on_show_both_sides)
 
@@ -90,28 +103,28 @@ class Previewer(QDialog):
         self.setLayout(self.vbox)
         restoreGeom(self, "preview")
 
-    def _on_finished(self, ok):
+    def _on_finished(self, ok: int) -> None:
         saveGeom(self, "preview")
         self.mw.progress.timer(100, self._on_close, False)
 
-    def _on_replay_audio(self):
+    def _on_replay_audio(self) -> None:
         if self._state == "question":
             replay_audio(self.card(), True)
         elif self._state == "answer":
             replay_audio(self.card(), False)
 
-    def close(self):
+    def close(self) -> None:
         self._on_close()
         super().close()
 
-    def _on_close(self):
+    def _on_close(self) -> None:
         self._open = False
         self._close_callback()
 
-    def _setup_web_view(self):
+    def _setup_web_view(self) -> None:
         jsinc = [
-            "js/vendor/jquery.js",
-            "js/vendor/browsersel.js",
+            "js/vendor/jquery.min.js",
+            "js/vendor/css_browser_selector.min.js",
             "js/mathjax.js",
             "js/vendor/mathjax/tex-chtml.js",
             "js/reviewer.js",
@@ -128,7 +141,7 @@ class Previewer(QDialog):
         if cmd.startswith("play:"):
             play_clicked_audio(cmd, self.card())
 
-    def render_card(self):
+    def render_card(self) -> None:
         self.cancel_timer()
         # Keep track of whether render() has ever been called
         # with cardChanged=True since the last successful render
@@ -143,7 +156,7 @@ class Previewer(QDialog):
         else:
             self._render_scheduled()
 
-    def cancel_timer(self):
+    def cancel_timer(self) -> None:
         if self._timer:
             self._timer.stop()
             self._timer = None
@@ -201,20 +214,19 @@ class Previewer(QDialog):
                 av_player.clear_queue_and_maybe_interrupt()
 
             txt = self.mw.prepare_card_text_for_display(txt)
-            txt = gui_hooks.card_will_show(txt, c, "preview" + self._state.capitalize())
+            txt = gui_hooks.card_will_show(txt, c, f"preview{self._state.capitalize()}")
             self._last_state = self._state_and_mod()
-        self._web.eval("{}({},'{}');".format(func, json.dumps(txt), bodyclass))
+        self._web.eval(f"{func}({json.dumps(txt)},'{bodyclass}');")
         self._card_changed = False
 
-    def _on_show_both_sides(self, toggle):
+    def _on_show_both_sides(self, toggle: bool) -> None:
         self._show_both_sides = toggle
-        self.mw.col.conf["previewBothSides"] = toggle
-        self.mw.col.setMod()
+        self.mw.col.set_config_bool(Config.Bool.PREVIEW_BOTH_SIDES, toggle)
         if self._state == "answer" and not toggle:
             self._state = "question"
         self.render_card()
 
-    def _state_and_mod(self):
+    def _state_and_mod(self) -> Tuple[str, int, int]:
         c = self.card()
         n = c.note()
         n.load()
@@ -233,7 +245,7 @@ class MultiCardPreviewer(Previewer):
         # need to state explicitly it's not implement to avoid W0223
         raise NotImplementedError
 
-    def _create_gui(self):
+    def _create_gui(self) -> None:
         super()._create_gui()
         self._prev = self.bbox.addButton("<", QDialogButtonBox.ActionRole)
         self._prev.setAutoDefault(False)
@@ -248,39 +260,39 @@ class MultiCardPreviewer(Previewer):
         qconnect(self._prev.clicked, self._on_prev)
         qconnect(self._next.clicked, self._on_next)
 
-    def _on_prev(self):
+    def _on_prev(self) -> None:
         if self._state == "answer" and not self._show_both_sides:
             self._state = "question"
             self.render_card()
         else:
             self._on_prev_card()
 
-    def _on_prev_card(self):
+    def _on_prev_card(self) -> None:
         pass
 
-    def _on_next(self):
+    def _on_next(self) -> None:
         if self._state == "question":
             self._state = "answer"
             self.render_card()
         else:
             self._on_next_card()
 
-    def _on_next_card(self):
+    def _on_next_card(self) -> None:
         pass
 
-    def _updateButtons(self):
+    def _updateButtons(self) -> None:
         if not self._open:
             return
         self._prev.setEnabled(self._should_enable_prev())
         self._next.setEnabled(self._should_enable_next())
 
-    def _should_enable_prev(self):
+    def _should_enable_prev(self) -> bool:
         return self._state == "answer" and not self._show_both_sides
 
-    def _should_enable_next(self):
+    def _should_enable_next(self) -> bool:
         return self._state == "question"
 
-    def _on_close(self):
+    def _on_close(self) -> None:
         super()._on_close()
         self._prev = None
         self._next = None
@@ -304,24 +316,20 @@ class BrowserPreviewer(MultiCardPreviewer):
             self._last_card_id = c.id
             return changed
 
-    def _on_finished(self, ok):
-        super()._on_finished(ok)
-        self._parent.form.previewButton.setChecked(False)
-
-    def _on_prev_card(self):
+    def _on_prev_card(self) -> None:
         self._parent.editor.saveNow(
             lambda: self._parent._moveCur(QAbstractItemView.MoveUp)
         )
 
-    def _on_next_card(self):
+    def _on_next_card(self) -> None:
         self._parent.editor.saveNow(
             lambda: self._parent._moveCur(QAbstractItemView.MoveDown)
         )
 
-    def _should_enable_prev(self):
+    def _should_enable_prev(self) -> bool:
         return super()._should_enable_prev() or self._parent.currentRow() > 0
 
-    def _should_enable_next(self):
+    def _should_enable_next(self) -> bool:
         return (
             super()._should_enable_next()
             or self._parent.currentRow() < self._parent.model.rowCount(None) - 1

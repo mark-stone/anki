@@ -5,21 +5,31 @@ from __future__ import annotations
 
 import copy
 import pprint
+import sys
 import time
+import traceback
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import anki  # pylint: disable=unused-import
-import anki.backend_pb2 as pb
+import anki._backend.backend_pb2 as _pb
 from anki.consts import *
-from anki.lang import without_unicode_isolation
-from anki.rsbackend import (
-    TR,
-    NotFoundError,
-    StockNoteType,
+from anki.errors import NotFoundError
+from anki.lang import TR, without_unicode_isolation
+from anki.stdmodels import StockNotetypeKind
+from anki.utils import (
+    checksum,
     from_json_bytes,
+    ids2str,
+    intTime,
+    joinFields,
+    splitFields,
     to_json_bytes,
 )
-from anki.utils import checksum, ids2str, intTime, joinFields, splitFields
+
+# public exports
+NoteTypeNameID = _pb.NoteTypeNameID
+NoteTypeNameIDUseCount = _pb.NoteTypeNameIDUseCount
+
 
 # types
 NoteType = Dict[str, Any]
@@ -31,36 +41,37 @@ class ModelsDictProxy:
     def __init__(self, col: anki.collection.Collection):
         self._col = col.weakref()
 
-    def _warn(self):
+    def _warn(self) -> None:
+        traceback.print_stack(file=sys.stdout)
         print("add-on should use methods on col.models, not col.models.models dict")
 
-    def __getitem__(self, item):
+    def __getitem__(self, item: Any) -> Any:
         self._warn()
         return self._col.models.get(int(item))
 
-    def __setitem__(self, key, val):
+    def __setitem__(self, key: str, val: Any) -> None:
         self._warn()
         self._col.models.save(val)
 
-    def __len__(self):
+    def __len__(self) -> int:
         self._warn()
         return len(self._col.models.all_names_and_ids())
 
-    def keys(self):
+    def keys(self) -> Any:
         self._warn()
         return [str(nt.id) for nt in self._col.models.all_names_and_ids()]
 
-    def values(self):
+    def values(self) -> Any:
         self._warn()
         return self._col.models.all()
 
-    def items(self):
+    def items(self) -> Any:
         self._warn()
         return [(str(nt["id"]), nt) for nt in self._col.models.all()]
 
-    def __contains__(self, item):
+    def __contains__(self, item: Any) -> bool:
         self._warn()
-        self._col.models.have(item)
+        return self._col.models.have(item)
 
 
 class ModelManager:
@@ -115,17 +126,17 @@ class ModelManager:
     def _get_cached(self, ntid: int) -> Optional[NoteType]:
         return self._cache.get(ntid)
 
-    def _clear_cache(self):
+    def _clear_cache(self) -> None:
         self._cache = {}
 
     # Listing note types
     #############################################################
 
-    def all_names_and_ids(self) -> Sequence[pb.NoteTypeNameID]:
-        return self.col.backend.get_notetype_names()
+    def all_names_and_ids(self) -> Sequence[NoteTypeNameID]:
+        return self.col._backend.get_notetype_names()
 
-    def all_use_counts(self) -> Sequence[pb.NoteTypeNameIDUseCount]:
-        return self.col.backend.get_notetype_names_and_counts()
+    def all_use_counts(self) -> Sequence[NoteTypeNameIDUseCount]:
+        return self.col._backend.get_notetype_names_and_counts()
 
     # legacy
 
@@ -155,14 +166,13 @@ class ModelManager:
 
     def setCurrent(self, m: NoteType) -> None:
         self.col.conf["curModel"] = m["id"]
-        self.col.setMod()
 
     # Retrieving and creating models
     #############################################################
 
     def id_for_name(self, name: str) -> Optional[int]:
         try:
-            return self.col.backend.get_notetype_id_by_name(name)
+            return self.col._backend.get_notetype_id_by_name(name)
         except NotFoundError:
             return None
 
@@ -177,7 +187,7 @@ class ModelManager:
         nt = self._get_cached(id)
         if not nt:
             try:
-                nt = from_json_bytes(self.col.backend.get_notetype_legacy(id))
+                nt = from_json_bytes(self.col._backend.get_notetype_legacy(id))
                 self._update_cache(nt)
             except NotFoundError:
                 return None
@@ -199,9 +209,7 @@ class ModelManager:
         "Create a new model, and return it."
         # caller should call save() after modifying
         nt = from_json_bytes(
-            self.col.backend.get_stock_notetype_legacy(
-                StockNoteType.STOCK_NOTE_TYPE_BASIC
-            )
+            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.BASIC)
         )
         nt["flds"] = []
         nt["tmpls"] = []
@@ -212,15 +220,15 @@ class ModelManager:
         "Delete model, and all its cards/notes."
         self.remove(m["id"])
 
-    def remove_all_notetypes(self):
+    def remove_all_notetypes(self) -> None:
         for nt in self.all_names_and_ids():
             self._remove_from_cache(nt.id)
-            self.col.backend.remove_notetype(nt.id)
+            self.col._backend.remove_notetype(nt.id)
 
     def remove(self, id: int) -> None:
         "Modifies schema."
         self._remove_from_cache(id)
-        self.col.backend.remove_notetype(id)
+        self.col._backend.remove_notetype(id)
 
     def add(self, m: NoteType) -> None:
         self.save(m)
@@ -230,11 +238,11 @@ class ModelManager:
         if existing_id is not None and existing_id != m["id"]:
             m["name"] += "-" + checksum(str(time.time()))[:5]
 
-    def update(self, m: NoteType, preserve_usn=True) -> None:
+    def update(self, m: NoteType, preserve_usn: bool = True) -> None:
         "Add or update an existing model. Use .save() instead."
         self._remove_from_cache(m["id"])
         self.ensureNameUnique(m)
-        m["id"] = self.col.backend.add_or_update_notetype(
+        m["id"] = self.col._backend.add_or_update_notetype(
             json=to_json_bytes(m), preserve_usn_and_mtime=preserve_usn
         )
         self.setCurrent(m)
@@ -278,7 +286,7 @@ class ModelManager:
 
     def fieldMap(self, m: NoteType) -> Dict[str, Tuple[int, Field]]:
         "Mapping of field name -> (ord, field)."
-        return dict((f["name"], (f["ord"], f)) for f in m["flds"])
+        return {f["name"]: (f["ord"], f) for f in m["flds"]}
 
     def fieldNames(self, m: NoteType) -> List[str]:
         return [f["name"] for f in m["flds"]]
@@ -292,9 +300,7 @@ class ModelManager:
     def new_field(self, name: str) -> Field:
         assert isinstance(name, str)
         nt = from_json_bytes(
-            self.col.backend.get_stock_notetype_legacy(
-                StockNoteType.STOCK_NOTE_TYPE_BASIC
-            )
+            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.BASIC)
         )
         field = nt["flds"][0]
         field["name"] = name
@@ -353,9 +359,7 @@ class ModelManager:
 
     def new_template(self, name: str) -> Template:
         nt = from_json_bytes(
-            self.col.backend.get_stock_notetype_legacy(
-                StockNoteType.STOCK_NOTE_TYPE_BASIC
-            )
+            self.col._backend.get_stock_notetype_legacy(StockNotetypeKind.BASIC)
         )
         template = nt["tmpls"][0]
         template["name"] = name
@@ -435,7 +439,7 @@ and notes.mid = ? and cards.ord = ?""",
         d = []
         nfields = len(newModel["flds"])
         for (nid, flds) in self.col.db.execute(
-            "select id, flds from notes where id in " + ids2str(nids)
+            f"select id, flds from notes where id in {ids2str(nids)}"
         ):
             newflds = {}
             flds = splitFields(flds)
@@ -468,7 +472,7 @@ and notes.mid = ? and cards.ord = ?""",
         d = []
         deleted = []
         for (cid, ord) in self.col.db.execute(
-            "select id, ord from cards where nid in " + ids2str(nids)
+            f"select id, ord from cards where nid in {ids2str(nids)}"
         ):
             # if the src model is a cloze, we ignore the map, as the gui
             # doesn't currently support mapping them
@@ -508,5 +512,5 @@ and notes.mid = ? and cards.ord = ?""",
         self, m: NoteType, flds: str, allowEmpty: bool = True
     ) -> List[int]:
         print("_availClozeOrds() is deprecated; use note.cloze_numbers_in_fields()")
-        note = anki.rsbackend.BackendNote(fields=[flds])
-        return list(self.col.backend.cloze_numbers_in_note(note))
+        note = _pb.Note(fields=[flds])
+        return list(self.col._backend.cloze_numbers_in_note(note))

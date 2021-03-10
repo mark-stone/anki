@@ -17,8 +17,8 @@ components enabled on the right.
 
 **Python 3.8**:
 
-Download Python 3.8 from <https://python.org>. Run the installer, and
-customize the installation. Select "install for all users", and choose
+Download the 64 bit Python 3.8 from <https://python.org>. Run the installer,
+and customize the installation. Select "install for all users", and choose
 the install path as c:\python. Currently the build scripts require
 Python to be installed in that location.
 
@@ -78,12 +78,21 @@ then run
 
 This will build Anki and run it in place.
 
-The first build will take while, as it downloads and builds a bunch of
+The first build will take a while, as it downloads and builds a bunch of
 dependencies. When the build is complete, Anki will automatically start.
 
-To play audio, mpv.exe or mplayer.exe must be on the path. At the time
-of writing, recording is not yet supported, as currently pyaudio is
-not being installed.
+To play and record audio, mpv.exe and lame.exe must be on the path.
+
+## Optimized builds
+
+The `.\run` command will create a non-optimized build by default. This is faster
+to compile, but will mean Anki will run considerably slower.
+
+To run Anki in optimized mode, use:
+
+```
+.\scripts\runopt
+```
 
 ## More
 

@@ -3,6 +3,7 @@
 
 #![deny(unused_must_use)]
 
+pub mod adding;
 pub mod backend;
 mod backend_proto;
 pub mod card;
@@ -19,13 +20,14 @@ mod fluent_proto;
 pub mod i18n;
 pub mod latex;
 pub mod log;
+mod markdown;
 pub mod media;
 pub mod notes;
 pub mod notetype;
 mod preferences;
 pub mod prelude;
 pub mod revlog;
-pub mod sched;
+pub mod scheduler;
 pub mod search;
 pub mod serde;
 mod stats;

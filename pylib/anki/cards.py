@@ -8,11 +8,11 @@ import time
 from typing import List, Optional
 
 import anki  # pylint: disable=unused-import
+import anki._backend.backend_pb2 as _pb
 from anki import hooks
 from anki.consts import *
 from anki.models import NoteType, Template
 from anki.notes import Note
-from anki.rsbackend import BackendCard
 from anki.sound import AVTag
 
 # Cards
@@ -45,14 +45,14 @@ class Card:
             self.load()
         else:
             # new card with defaults
-            self._load_from_backend_card(BackendCard())
+            self._load_from_backend_card(_pb.Card())
 
     def load(self) -> None:
-        c = self.col.backend.get_card(self.id)
+        c = self.col._backend.get_card(self.id)
         assert c
         self._load_from_backend_card(c)
 
-    def _load_from_backend_card(self, c: BackendCard) -> None:
+    def _load_from_backend_card(self, c: _pb.Card) -> None:
         self._render_output = None
         self._note = None
         self.id = c.id
@@ -74,19 +74,9 @@ class Card:
         self.flags = c.flags
         self.data = c.data
 
-    def _bugcheck(self) -> None:
-        if (
-            self.queue == QUEUE_TYPE_REV
-            and self.odue
-            and not self.col.decks.isDyn(self.did)
-        ):
-            hooks.card_odue_was_invalid()
-
-    def flush(self) -> None:
-        self._bugcheck()
-        hooks.card_will_flush(self)
+    def _to_backend_card(self) -> _pb.Card:
         # mtime & usn are set by backend
-        card = BackendCard(
+        return _pb.Card(
             id=self.id,
             note_id=self.nid,
             deck_id=self.did,
@@ -104,10 +94,15 @@ class Card:
             flags=self.flags,
             data=self.data,
         )
+
+    def flush(self) -> None:
+        hooks.card_will_flush(self)
         if self.id != 0:
-            self.col.backend.update_card(card)
+            self.col._backend.update_card(
+                card=self._to_backend_card(), skip_undo_entry=True
+            )
         else:
-            self.id = self.col.backend.add_card(card)
+            raise Exception("card.flush() expects an existing card")
 
     def question(self, reload: bool = False, browser: bool = False) -> str:
         return self.render_output(reload, browser).question_and_style()
@@ -123,7 +118,7 @@ class Card:
 
     # legacy
     def css(self) -> str:
-        return "<style>%s</style>" % self.render_output().css
+        return f"<style>{self.render_output().css}</style>"
 
     def render_output(
         self, reload: bool = False, browser: bool = False
@@ -141,7 +136,7 @@ class Card:
 
     def note(self, reload: bool = False) -> Note:
         if not self._note or reload:
-            self._note = self.col.getNote(self.nid)
+            self._note = self.col.get_note(self.nid)
         return self._note
 
     def note_type(self) -> NoteType:
@@ -197,9 +192,14 @@ class Card:
         del d["timerStarted"]
         return f"{super().__repr__()} {pprint.pformat(d, width=300)}"
 
-    def userFlag(self) -> int:
+    def user_flag(self) -> int:
         return self.flags & 0b111
 
-    def setUserFlag(self, flag: int) -> None:
+    def set_user_flag(self, flag: int) -> None:
         assert 0 <= flag <= 7
         self.flags = (self.flags & ~0b111) | flag
+
+    # legacy
+
+    userFlag = user_flag
+    setUserFlag = set_user_flag

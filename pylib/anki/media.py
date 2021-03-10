@@ -11,19 +11,24 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Match, Optional, Tuple
 
 import anki
+import anki._backend.backend_pb2 as _pb
 from anki.consts import *
 from anki.latex import render_latex, render_latex_returning_errors
-from anki.rsbackend import pb
+from anki.sound import SoundOrVideoTag
+from anki.template import av_tags_to_native
 from anki.utils import intTime
 
 
 def media_paths_from_col_path(col_path: str) -> Tuple[str, str]:
     media_folder = re.sub(r"(?i)\.(anki2)$", ".media", col_path)
-    media_db = media_folder + ".db2"
+    media_db = f"{media_folder}.db2"
     return (media_folder, media_db)
+
+
+CheckMediaOut = _pb.CheckMediaOut
 
 
 # fixme: look into whether we can drop chdir() below
@@ -95,6 +100,24 @@ class MediaManager:
         except FileNotFoundError:
             pass
 
+    def empty_trash(self) -> None:
+        self.col._backend.empty_trash()
+
+    def restore_trash(self) -> None:
+        self.col._backend.restore_trash()
+
+    def strip_av_tags(self, text: str) -> str:
+        return self.col._backend.strip_av_tags(text)
+
+    def _extract_filenames(self, text: str) -> List[str]:
+        "This only exists do support a legacy function; do not use."
+        out = self.col._backend.extract_av_tags(text=text, question_side=True)
+        return [
+            x.filename
+            for x in av_tags_to_native(out.av_tags)
+            if isinstance(x, SoundOrVideoTag)
+        ]
+
     # File manipulation
     ##########################################################################
 
@@ -109,7 +132,7 @@ class MediaManager:
         """Write the file to the media folder, renaming if not unique.
 
         Returns possibly-renamed filename."""
-        return self.col.backend.add_media_file(desired_name=desired_fname, data=data)
+        return self.col._backend.add_media_file(desired_name=desired_fname, data=data)
 
     def add_extension_based_on_mime(self, fname: str, content_type: str) -> str:
         "If jpg or png mime, add .png/.jpg if missing extension."
@@ -130,7 +153,7 @@ class MediaManager:
 
     def trash_files(self, fnames: List[str]) -> None:
         "Move provided files to the trash."
-        self.col.backend.trash_media_files(fnames)
+        self.col._backend.trash_media_files(fnames)
 
     # String manipulation
     ##########################################################################
@@ -174,7 +197,7 @@ class MediaManager:
         else:
             fn = urllib.parse.quote
 
-        def repl(match):
+        def repl(match: Match) -> str:
             tag = match.group(0)
             fname = match.group("fname")
             if re.match("(https?|ftp)://", fname):
@@ -188,8 +211,8 @@ class MediaManager:
     # Checking media
     ##########################################################################
 
-    def check(self) -> pb.CheckMediaOut:
-        output = self.col.backend.check_media()
+    def check(self) -> CheckMediaOut:
+        output = self.col._backend.check_media()
         # files may have been renamed on disk, so an undo at this point could
         # break file references
         self.col.save()

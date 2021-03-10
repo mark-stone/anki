@@ -10,12 +10,12 @@ import os
 import sys
 import tempfile
 import traceback
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import anki.lang
 from anki import version as _version
+from anki._backend import RustBackend
 from anki.consts import HELP_SITE
-from anki.rsbackend import RustBackend
 from anki.utils import checksum, isLin, isMac
 from aqt.qt import *
 from aqt.utils import TR, locale_dir, tr
@@ -37,7 +37,7 @@ appUpdate = "https://ankiweb.net/update/desktop"
 appHelpSite = HELP_SITE
 
 from aqt.main import AnkiQt  # isort:skip
-from aqt.profiles import ProfileManager, AnkiRestart  # isort:skip
+from aqt.profiles import ProfileManager, AnkiRestart, VideoDriver  # isort:skip
 
 profiler: Optional[cProfile.Profile] = None
 mw: Optional[AnkiQt] = None  # set on init
@@ -69,7 +69,7 @@ except ImportError as e:
 # - make preferences modal? cmd+q does wrong thing
 
 
-from aqt import addcards, browser, editcurrent  # isort:skip
+from aqt import addcards, addons, browser, editcurrent, dyndeckconf  # isort:skip
 from aqt import stats, about, preferences, mediasync  # isort:skip
 
 
@@ -77,8 +77,10 @@ class DialogManager:
 
     _dialogs: Dict[str, list] = {
         "AddCards": [addcards.AddCards, None],
+        "AddonsDialog": [addons.AddonsDialog, None],
         "Browser": [browser.Browser, None],
         "EditCurrent": [editcurrent.EditCurrent, None],
+        "DynDeckConfDialog": [dyndeckconf.DeckConf, None],
         "DeckStats": [stats.DeckStats, None],
         "NewDeckStats": [stats.NewDeckStats, None],
         "About": [about.show, None],
@@ -86,7 +88,7 @@ class DialogManager:
         "sync_log": [mediasync.MediaSyncDialog, None],
     }
 
-    def open(self, name: str, *args: Any) -> Any:
+    def open(self, name: str, *args: Any, **kwargs: Any) -> Any:
         (creator, instance) = self._dialogs[name]
         if instance:
             if instance.windowState() & Qt.WindowMinimized:
@@ -94,17 +96,16 @@ class DialogManager:
             instance.activateWindow()
             instance.raise_()
             if hasattr(instance, "reopen"):
-                instance.reopen(*args)
-            return instance
+                instance.reopen(*args, **kwargs)
         else:
-            instance = creator(*args)
+            instance = creator(*args, **kwargs)
             self._dialogs[name][1] = instance
-            return instance
+        return instance
 
-    def markClosed(self, name: str):
+    def markClosed(self, name: str) -> None:
         self._dialogs[name] = [self._dialogs[name][0], None]
 
-    def allClosed(self):
+    def allClosed(self) -> bool:
         return not any(x[1] for x in self._dialogs.values())
 
     def closeAll(self, onsuccess: Callable[[], None]) -> Optional[bool]:
@@ -118,7 +119,7 @@ class DialogManager:
             if not instance:
                 continue
 
-            def callback():
+            def callback() -> None:
                 if self.allClosed():
                     onsuccess()
                 else:
@@ -135,7 +136,7 @@ class DialogManager:
 
     def register_dialog(
         self, name: str, creator: Union[Callable, type], instance: Optional[Any] = None
-    ):
+    ) -> None:
         """Allows add-ons to register a custom dialog to be managed by Anki's dialog
         manager, which ensures that only one copy of the window is open at once,
         and that the dialog cleans up asynchronously when the collection closes
@@ -188,12 +189,12 @@ def setupLangAndBackend(
         pass
 
     # add _ and ngettext globals used by legacy code
-    def fn__(arg):
+    def fn__(arg) -> None:  # type: ignore
         print("".join(traceback.format_stack()[-2]))
         print("_ global will break in the future; please see anki/lang.py")
         return arg
 
-    def fn_ngettext(a, b, c):
+    def fn_ngettext(a, b, c) -> None:  # type: ignore
         print("".join(traceback.format_stack()[-2]))
         print("ngettext global will break in the future; please see anki/lang.py")
         return b
@@ -221,9 +222,17 @@ def setupLangAndBackend(
 
     # load qt translations
     _qtrans = QTranslator()
-    qt_dir = os.path.join(ldir, "qt")
+
+    from aqt.utils import aqt_data_folder
+
+    if isMac and getattr(sys, "frozen", False):
+        qt_dir = os.path.abspath(
+            os.path.join(aqt_data_folder(), "..", "qt_translations")
+        )
+    else:
+        qt_dir = QLibraryInfo.location(QLibraryInfo.TranslationsPath)
     qt_lang = lang.replace("-", "_")
-    if _qtrans.load("qtbase_" + qt_lang, qt_dir):
+    if _qtrans.load(f"qtbase_{qt_lang}", qt_dir):
         app.installTranslator(_qtrans)
 
     return anki.lang.current_i18n
@@ -240,14 +249,14 @@ class AnkiApp(QApplication):
 
     appMsg = pyqtSignal(str)
 
-    KEY = "anki" + checksum(getpass.getuser())
+    KEY = f"anki{checksum(getpass.getuser())}"
     TMOUT = 30000
 
-    def __init__(self, argv):
+    def __init__(self, argv: List[str]) -> None:
         QApplication.__init__(self, argv)
         self._argv = argv
 
-    def secondInstance(self):
+    def secondInstance(self) -> bool:
         # we accept only one command line argument. if it's missing, send
         # a blank screen to just raise the existing window
         opts, args = parseArgs(self._argv)
@@ -266,7 +275,7 @@ class AnkiApp(QApplication):
             self._srv.listen(self.KEY)
             return False
 
-    def sendMsg(self, txt):
+    def sendMsg(self, txt: str) -> bool:
         sock = QLocalSocket(self)
         sock.connectToServer(self.KEY, QIODevice.WriteOnly)
         if not sock.waitForConnected(self.TMOUT):
@@ -285,7 +294,7 @@ class AnkiApp(QApplication):
         sock.disconnectFromServer()
         return True
 
-    def onRecv(self):
+    def onRecv(self) -> None:
         sock = self._srv.nextPendingConnection()
         if not sock.waitForReadyRead(self.TMOUT):
             sys.stderr.write(sock.errorString())
@@ -297,36 +306,43 @@ class AnkiApp(QApplication):
     # OS X file/url handler
     ##################################################
 
-    def event(self, evt):
+    def event(self, evt: QEvent) -> bool:
         if evt.type() == QEvent.FileOpen:
             self.appMsg.emit(evt.file() or "raise")  # type: ignore
             return True
         return QApplication.event(self, evt)
 
 
-def parseArgs(argv):
+def parseArgs(argv: List[str]) -> Tuple[argparse.Namespace, List[str]]:
     "Returns (opts, args)."
     # py2app fails to strip this in some instances, then anki dies
     # as there's no such profile
     if isMac and len(argv) > 1 and argv[1].startswith("-psn"):
         argv = [argv[0]]
-    parser = argparse.ArgumentParser(description="Anki " + appVersion)
+    parser = argparse.ArgumentParser(description=f"Anki {appVersion}")
     parser.usage = "%(prog)s [OPTIONS] [file to import/add-on to install]"
     parser.add_argument("-b", "--base", help="path to base folder", default="")
     parser.add_argument("-p", "--profile", help="profile name to load", default="")
     parser.add_argument("-l", "--lang", help="interface language (en, de, etc)")
-    parser.add_argument("-v", "--version", help="print the Anki version and exit")
     parser.add_argument(
-        "-s", "--safemode", help="disable add-ons and automatic syncing"
+        "-v", "--version", help="print the Anki version and exit", action="store_true"
+    )
+    parser.add_argument(
+        "--safemode", help="disable add-ons and automatic syncing", action="store_true"
+    )
+    parser.add_argument(
+        "--syncserver",
+        help="skip GUI and start a local sync server",
+        action="store_true",
     )
     return parser.parse_known_args(argv[1:])
 
 
-def setupGL(pm):
+def setupGL(pm: aqt.profiles.ProfileManager) -> None:
     if isMac:
         return
 
-    mode = pm.glMode()
+    driver = pm.video_driver()
 
     # work around pyqt loading wrong GL library
     if isLin:
@@ -335,7 +351,7 @@ def setupGL(pm):
         ctypes.CDLL("libGL.so.1", ctypes.RTLD_GLOBAL)
 
     # catch opengl errors
-    def msgHandler(category, ctx, msg):
+    def msgHandler(category: Any, ctx: Any, msg: Any) -> None:
         if category == QtDebugMsg:
             category = "debug"
         elif category == QtInfoMsg:
@@ -366,35 +382,41 @@ def setupGL(pm):
                 None,
                 tr(TR.QT_MISC_ERROR),
                 tr(
-                    TR.QT_MISC_ERROR_LOADING_GRAPHICS_DRIVER, mode=mode, context=context
+                    TR.QT_MISC_ERROR_LOADING_GRAPHICS_DRIVER,
+                    mode=driver.value,
+                    context=context,
                 ),
             )
-            pm.nextGlMode()
+            pm.set_video_driver(driver.next())
             return
         else:
             print(f"Qt {category}: {msg} {context}")
 
     qInstallMessageHandler(msgHandler)
 
-    if mode == "auto":
-        return
-    elif isLin:
-        os.environ["QT_XCB_FORCE_SOFTWARE_OPENGL"] = "1"
+    if driver == VideoDriver.OpenGL:
+        pass
     else:
-        os.environ["QT_OPENGL"] = mode
+        if isWin:
+            os.environ["QT_OPENGL"] = driver.value
+        elif isMac:
+            QCoreApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)
+        elif isLin:
+            os.environ["QT_XCB_FORCE_SOFTWARE_OPENGL"] = "1"
 
 
 PROFILE_CODE = os.environ.get("ANKI_PROFILE_CODE")
 
 
-def write_profile_results():
+def write_profile_results() -> None:
 
     profiler.disable()
     profiler.dump_stats("anki.prof")
     print("profile stats written to anki.prof")
+    print("use 'bazel run qt:profile' to explore")
 
 
-def run():
+def run() -> None:
     try:
         _run()
     except Exception as e:
@@ -402,11 +424,11 @@ def run():
         QMessageBox.critical(
             None,
             "Startup Error",
-            "Please notify support of this error:\n\n" + traceback.format_exc(),
+            f"Please notify support of this error:\n\n{traceback.format_exc()}",
         )
 
 
-def _run(argv=None, exec=True):
+def _run(argv: Optional[List[str]] = None, exec: bool = True) -> Optional[AnkiApp]:
     """Start AnkiQt application or reuse an existing instance if one exists.
 
     If the function is invoked with exec=False, the AnkiQt will not enter
@@ -426,8 +448,13 @@ def _run(argv=None, exec=True):
     opts, args = parseArgs(argv)
 
     if opts.version:
-        print(f"Anki version '{appVersion}'")
-        return
+        print(f"Anki {appVersion}")
+        return None
+    elif opts.syncserver:
+        from anki.syncserver import serve
+
+        serve()
+        return None
 
     if PROFILE_CODE:
 
@@ -446,7 +473,7 @@ def _run(argv=None, exec=True):
     except AnkiRestart as error:
         if error.exitcode:
             sys.exit(error.exitcode)
-        return
+        return None
     except:
         # will handle below
         traceback.print_exc()
@@ -461,6 +488,7 @@ def _run(argv=None, exec=True):
     # opt in to full hidpi support?
     if not os.environ.get("ANKI_NOHIGHDPI"):
         QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+        QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
         os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
         os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
 
@@ -481,7 +509,7 @@ def _run(argv=None, exec=True):
     app = AnkiApp(argv)
     if app.secondInstance():
         # we've signaled the primary instance, so we should close
-        return
+        return None
 
     if not pm:
         QMessageBox.critical(
@@ -489,7 +517,7 @@ def _run(argv=None, exec=True):
             tr(TR.QT_MISC_ERROR),
             tr(TR.PROFILES_COULD_NOT_CREATE_DATA_FOLDER),
         )
-        return
+        return None
 
     # disable icons on mac; this must be done before window created
     if isMac:
@@ -529,7 +557,7 @@ def _run(argv=None, exec=True):
             tr(TR.QT_MISC_ERROR),
             tr(TR.QT_MISC_NO_TEMP_FOLDER),
         )
-        return
+        return None
 
     if pmLoadResult.firstTime:
         pm.setDefaultLang(lang[0])
@@ -547,11 +575,12 @@ def _run(argv=None, exec=True):
     # i18n & backend
     backend = setupLangAndBackend(pm, app, opts.lang, pmLoadResult.firstTime)
 
-    if isLin and pm.glMode() == "auto":
+    driver = pm.video_driver()
+    if isLin and driver == VideoDriver.OpenGL:
         from aqt.utils import gfxDriverIsBroken
 
         if gfxDriverIsBroken():
-            pm.nextGlMode()
+            pm.set_video_driver(driver.next())
             QMessageBox.critical(
                 None,
                 tr(TR.QT_MISC_ERROR),
@@ -570,3 +599,5 @@ def _run(argv=None, exec=True):
 
     if PROFILE_CODE:
         write_profile_results()
+
+    return None

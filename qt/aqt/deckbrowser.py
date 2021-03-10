@@ -1,24 +1,34 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 from __future__ import annotations
 
+from concurrent.futures import Future
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import Any
 
 import aqt
-from anki.errors import DeckRenameError
-from anki.rsbackend import TR, DeckTreeNode
-from anki.utils import ids2str
+from anki.decks import DeckTreeNode
+from anki.errors import DeckIsFilteredError
+from anki.utils import intTime
 from aqt import AnkiQt, gui_hooks
 from aqt.qt import *
 from aqt.sound import av_player
 from aqt.toolbar import BottomBar
-from aqt.utils import TR, askUser, getOnlyText, openLink, shortcut, showWarning, tr
+from aqt.utils import (
+    TR,
+    askUser,
+    getOnlyText,
+    openLink,
+    shortcut,
+    showInfo,
+    showWarning,
+    tr,
+)
 
 
 class DeckBrowserBottomBar:
-    def __init__(self, deck_browser: DeckBrowser):
+    def __init__(self, deck_browser: DeckBrowser) -> None:
         self.deck_browser = deck_browser
 
 
@@ -49,23 +59,24 @@ class DeckBrowser:
         self.web = mw.web
         self.bottom = BottomBar(mw, mw.bottomWeb)
         self.scrollPos = QPoint(0, 0)
+        self._v1_message_dismissed_at = 0
 
-    def show(self):
+    def show(self) -> None:
         av_player.stop_and_clear_queue()
         self.web.set_bridge_command(self._linkHandler, self)
         self._renderPage()
         # redraw top bar for theme change
         self.mw.toolbar.redraw()
 
-    def refresh(self):
+    def refresh(self) -> None:
         self._renderPage()
 
     # Event handlers
     ##########################################################################
 
-    def _linkHandler(self, url):
+    def _linkHandler(self, url: str) -> Any:
         if ":" in url:
-            (cmd, arg) = url.split(":")
+            (cmd, arg) = url.split(":", 1)
         else:
             cmd = url
         if cmd == "open":
@@ -77,20 +88,23 @@ class DeckBrowser:
         elif cmd == "import":
             self.mw.onImport()
         elif cmd == "create":
-            deck = getOnlyText(tr(TR.DECKS_NAME_FOR_DECK))
-            if deck:
-                self.mw.col.decks.id(deck)
-                gui_hooks.sidebar_should_refresh_decks()
-                self.refresh()
+            self._on_create()
         elif cmd == "drag":
-            draggedDeckDid, ontoDeckDid = arg.split(",")
-            self._dragDeckOnto(draggedDeckDid, ontoDeckDid)
+            source, target = arg.split(",")
+            self._handle_drag_and_drop(int(source), int(target or 0))
         elif cmd == "collapse":
             self._collapse(int(arg))
+        elif cmd == "v2upgrade":
+            self._confirm_upgrade()
+        elif cmd == "v2upgradeinfo":
+            openLink("https://faqs.ankiweb.net/the-anki-2.1-scheduler.html")
+        elif cmd == "v2upgradelater":
+            self._v1_message_dismissed_at = intTime()
+            self.refresh()
         return False
 
-    def _selDeck(self, did):
-        self.mw.col.decks.select(did)
+    def _selDeck(self, did: str) -> None:
+        self.mw.col.decks.select(int(did))
         self.mw.onOverview()
 
     # HTML generation
@@ -107,23 +121,27 @@ class DeckBrowser:
 </center>
 """
 
-    def _renderPage(self, reuse=False):
+    def _renderPage(self, reuse: bool = False) -> None:
         if not reuse:
             self._dueTree = self.mw.col.sched.deck_due_tree()
             self.__renderPage(None)
             return
         self.web.evalWithCallback("window.pageYOffset", self.__renderPage)
 
-    def __renderPage(self, offset):
+    def __renderPage(self, offset: int) -> None:
         content = DeckBrowserContent(
             tree=self._renderDeckTree(self._dueTree),
             stats=self._renderStats(),
         )
         gui_hooks.deck_browser_will_render_content(self, content)
         self.web.stdHtml(
-            self._body % content.__dict__,
+            self._v1_upgrade_message() + self._body % content.__dict__,
             css=["css/deckbrowser.css"],
-            js=["js/vendor/jquery.js", "js/vendor/jquery-ui.js", "js/deckbrowser.js"],
+            js=[
+                "js/vendor/jquery.min.js",
+                "js/vendor/jquery-ui.min.js",
+                "js/deckbrowser.js",
+            ],
             context=self,
         )
         self.web.key = "deckBrowser"
@@ -132,11 +150,13 @@ class DeckBrowser:
             self._scrollToOffset(offset)
         gui_hooks.deck_browser_did_render(self)
 
-    def _scrollToOffset(self, offset):
+    def _scrollToOffset(self, offset: int) -> None:
         self.web.eval("$(function() { window.scrollTo(0, %d, 'instant'); });" % offset)
 
-    def _renderStats(self):
-        return self.mw.col.studied_today()
+    def _renderStats(self) -> str:
+        return '<div id="studiedToday"><span>{}</span></div>'.format(
+            self.mw.col.studied_today(),
+        )
 
     def _renderDeckTree(self, top: DeckTreeNode) -> str:
         buf = """
@@ -163,7 +183,7 @@ class DeckBrowser:
 
         due = node.review_count + node.learn_count
 
-        def indent():
+        def indent() -> str:
             return "&nbsp;" * 6 * (node.level - 1)
 
         if node.deck_id == ctx.current_deck_id:
@@ -195,7 +215,7 @@ class DeckBrowser:
             node.name,
         )
         # due counts
-        def nonzeroColour(cnt, klass):
+        def nonzeroColour(cnt: int, klass: str) -> str:
             if not cnt:
                 klass = "zero-count"
             return f'<span class="{klass}">{cnt}</span>'
@@ -215,7 +235,7 @@ class DeckBrowser:
                 buf += self._render_deck_node(child, ctx)
         return buf
 
-    def _topLevelDragRow(self):
+    def _topLevelDragRow(self) -> str:
         return "<tr class='top-level-drag-row'><td colspan='6'>&nbsp;</td></tr>"
 
     # Options
@@ -228,17 +248,16 @@ class DeckBrowser:
         a = m.addAction(tr(TR.ACTIONS_OPTIONS))
         qconnect(a.triggered, lambda b, did=did: self._options(did))
         a = m.addAction(tr(TR.ACTIONS_EXPORT))
-        qconnect(a.triggered, lambda b, did=did: self._export(did))
+        qconnect(a.triggered, lambda b, did=did: self._export(int(did)))
         a = m.addAction(tr(TR.ACTIONS_DELETE))
         qconnect(a.triggered, lambda b, did=did: self._delete(int(did)))
         gui_hooks.deck_browser_will_show_options_menu(m, int(did))
         m.exec_(QCursor.pos())
 
-    def _export(self, did):
+    def _export(self, did: int) -> None:
         self.mw.onExport(did=did)
 
     def _rename(self, did: int) -> None:
-        self.mw.checkpoint(tr(TR.ACTIONS_RENAME_DECK))
         deck = self.mw.col.decks.get(did)
         oldName = deck["name"]
         newName = getOnlyText(tr(TR.DECKS_NEW_DECK_NAME), default=oldName)
@@ -248,14 +267,16 @@ class DeckBrowser:
         try:
             self.mw.col.decks.rename(deck, newName)
             gui_hooks.sidebar_should_refresh_decks()
-        except DeckRenameError as e:
-            return showWarning(e.description)
+        except DeckIsFilteredError as err:
+            showWarning(str(err))
+            return
+        self.mw.update_undo_actions()
         self.show()
 
-    def _options(self, did):
+    def _options(self, did: str) -> None:
         # select the deck first, because the dyn deck conf assumes the deck
         # we're editing is the current one
-        self.mw.col.decks.select(did)
+        self.mw.col.decks.select(int(did))
         self.mw.onDeckConf()
 
     def _collapse(self, did: int) -> None:
@@ -265,39 +286,43 @@ class DeckBrowser:
             node.collapsed = not node.collapsed
         self._renderPage(reuse=True)
 
-    def _dragDeckOnto(self, draggedDeckDid, ontoDeckDid):
+    def _handle_drag_and_drop(self, source: int, target: int) -> None:
         try:
-            self.mw.col.decks.renameForDragAndDrop(draggedDeckDid, ontoDeckDid)
-            gui_hooks.sidebar_should_refresh_decks()
-        except DeckRenameError as e:
-            return showWarning(e.description)
-
+            self.mw.col.decks.drag_drop_decks([source], target)
+        except Exception as e:
+            showWarning(str(e))
+            return
+        gui_hooks.sidebar_should_refresh_decks()
         self.show()
 
-    def _delete(self, did):
-        self.mw.checkpoint(tr(TR.DECKS_DELETE_DECK))
+    def ask_delete_deck(self, did: int) -> bool:
         deck = self.mw.col.decks.get(did)
-        if not deck["dyn"]:
-            dids = [did] + [r[1] for r in self.mw.col.decks.children(did)]
-            cnt = self.mw.col.db.scalar(
-                "select count() from cards where did in {0} or "
-                "odid in {0}".format(ids2str(dids))
-            )
-            if cnt:
-                extra = tr(TR.DECKS_IT_HAS_CARD, count=cnt)
-            else:
-                extra = None
-        if (
-            deck["dyn"]
-            or not extra
-            or askUser(
-                (tr(TR.DECKS_ARE_YOU_SURE_YOU_WISH_TO, val=deck["name"])) + extra
-            )
+        if deck["dyn"]:
+            return True
+
+        count = self.mw.col.decks.card_count(did, include_subdecks=True)
+        if not count:
+            return True
+
+        extra = tr(TR.DECKS_IT_HAS_CARD, count=count)
+        if askUser(
+            f"{tr(TR.DECKS_ARE_YOU_SURE_YOU_WISH_TO, val=deck['name'])} {extra}"
         ):
-            self.mw.progress.start()
-            self.mw.col.decks.rem(did, True)
-            self.mw.progress.finish()
-            self.show()
+            return True
+        return False
+
+    def _delete(self, did: int) -> None:
+        if self.ask_delete_deck(did):
+
+            def do_delete() -> None:
+                return self.mw.col.decks.rem(did, True)
+
+            def on_done(fut: Future) -> None:
+                self.mw.update_undo_actions()
+                self.show()
+                res = fut.result()  # Required to check for errors
+
+            self.mw.taskman.with_progress(do_delete, on_done)
 
     # Top buttons
     ######################################################################
@@ -308,7 +333,7 @@ class DeckBrowser:
         ["Ctrl+Shift+I", "import", tr(TR.DECKS_IMPORT_FILE)],
     ]
 
-    def _drawButtons(self):
+    def _drawButtons(self) -> None:
         buf = ""
         drawLinks = deepcopy(self.drawLinks)
         for b in drawLinks:
@@ -324,5 +349,61 @@ class DeckBrowser:
             web_context=DeckBrowserBottomBar(self),
         )
 
-    def _onShared(self):
-        openLink(aqt.appShared + "decks/")
+    def _onShared(self) -> None:
+        openLink(f"{aqt.appShared}decks/")
+
+    def _on_create(self) -> None:
+        deck = getOnlyText(tr(TR.DECKS_NAME_FOR_DECK))
+        if deck:
+            try:
+                self.mw.col.decks.id(deck)
+            except DeckIsFilteredError as err:
+                showWarning(str(err))
+                return
+            gui_hooks.sidebar_should_refresh_decks()
+            self.refresh()
+
+    ######################################################################
+
+    def _v1_upgrade_message(self) -> str:
+        if self.mw.col.schedVer() == 2:
+            return ""
+        if (intTime() - self._v1_message_dismissed_at) < 86_400:
+            return ""
+
+        return f"""
+<center>
+<div class=callout>
+    <div>
+      {tr(TR.SCHEDULING_UPDATE_SOON)}
+    </div>
+    <div>
+      <button onclick='pycmd("v2upgrade")'>
+        {tr(TR.SCHEDULING_UPDATE_BUTTON)}
+      </button>
+      <button onclick='pycmd("v2upgradeinfo")'>
+        {tr(TR.SCHEDULING_UPDATE_MORE_INFO_BUTTON)}
+      </button>
+      <button onclick='pycmd("v2upgradelater")'>
+        {tr(TR.SCHEDULING_UPDATE_LATER_BUTTON)}
+      </button>
+    </div>
+</div>
+</center>
+"""
+
+    def _confirm_upgrade(self) -> None:
+        self.mw.col.modSchema(check=True)
+        self.mw.col.upgrade_to_v2_scheduler()
+
+        # not translated, as 2.15 should not be too far off
+        if askUser(
+            "Do you use AnkiDroid <= 2.14, or plan to use it in the near future? If unsure, choose No. You can adjust the setting later in the preferences screen.",
+            defaultno=True,
+        ):
+            prefs = self.mw.col.get_preferences()
+            prefs.scheduling.new_timezone = False
+            self.mw.col.set_preferences(prefs)
+
+        showInfo(tr(TR.SCHEDULING_UPDATE_DONE))
+        self.refresh()

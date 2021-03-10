@@ -5,6 +5,7 @@ use super::{Deck, DeckKind, DueCounts};
 use crate::{
     backend_proto::DeckTreeNode,
     collection::Collection,
+    config::{BoolKey, SchedulerVersion},
     deckconf::{DeckConf, DeckConfID},
     decks::DeckID,
     err::Result,
@@ -122,6 +123,43 @@ fn apply_limits(
     node.review_count = (node.review_count + child_rev_total).min(remaining_rev);
 }
 
+/// Apply parent new limits to children, and add child counts to parents. Unlike
+/// v1 and the 2021 scheduler, reviews are not capped by their parents, and we
+/// return the uncapped review amount to add to the parent.
+/// Counts are (new, review).
+fn apply_limits_v2_old(
+    node: &mut DeckTreeNode,
+    today: u32,
+    decks: &HashMap<DeckID, Deck>,
+    dconf: &HashMap<DeckConfID, DeckConf>,
+    parent_limits: (u32, u32),
+) -> u32 {
+    let original_rev_count = node.review_count;
+
+    let (mut remaining_new, remaining_rev) =
+        remaining_counts_for_deck(DeckID(node.deck_id), today, decks, dconf);
+
+    // cap remaining to parent limits
+    remaining_new = remaining_new.min(parent_limits.0);
+
+    // apply our limit to children and tally their counts
+    let mut child_new_total = 0;
+    let mut child_rev_total = 0;
+    for child in &mut node.children {
+        child_rev_total +=
+            apply_limits_v2_old(child, today, decks, dconf, (remaining_new, remaining_rev));
+        child_new_total += child.new_count;
+        // no limit on learning cards
+        node.learn_count += child.learn_count;
+    }
+
+    // add child counts to our count, capped to remaining limit
+    node.new_count = (node.new_count + child_new_total).min(remaining_new);
+    node.review_count = (node.review_count + child_rev_total).min(remaining_rev);
+
+    original_rev_count + child_rev_total
+}
+
 fn remaining_counts_for_deck(
     did: DeckID,
     today: u32,
@@ -224,12 +262,7 @@ impl Collection {
         let names = self.storage.get_all_deck_names()?;
         let mut tree = deck_names_to_tree(names);
 
-        let decks_map: HashMap<_, _> = self
-            .storage
-            .get_all_decks()?
-            .into_iter()
-            .map(|d| (d.id, d))
-            .collect();
+        let decks_map = self.storage.get_decks_map()?;
 
         add_collapsed_and_filtered(&mut tree, &decks_map, now.is_none());
         if self.default_deck_is_empty()? {
@@ -247,20 +280,27 @@ impl Collection {
             let days_elapsed = self.timing_for_timestamp(now)?.days_elapsed;
             let learn_cutoff = (now.0 as u32) + self.learn_ahead_secs();
             let counts = self.due_counts(days_elapsed, learn_cutoff, limit)?;
-            let dconf: HashMap<_, _> = self
-                .storage
-                .all_deck_config()?
-                .into_iter()
-                .map(|d| (d.id, d))
-                .collect();
+            let dconf = self.storage.get_deck_config_map()?;
             add_counts(&mut tree, &counts);
-            apply_limits(
-                &mut tree,
-                days_elapsed,
-                &decks_map,
-                &dconf,
-                (std::u32::MAX, std::u32::MAX),
-            );
+            if self.scheduler_version() == SchedulerVersion::V2
+                && !self.get_bool(BoolKey::Sched2021)
+            {
+                apply_limits_v2_old(
+                    &mut tree,
+                    days_elapsed,
+                    &decks_map,
+                    &dconf,
+                    (std::u32::MAX, std::u32::MAX),
+                );
+            } else {
+                apply_limits(
+                    &mut tree,
+                    days_elapsed,
+                    &decks_map,
+                    &dconf,
+                    (std::u32::MAX, std::u32::MAX),
+                );
+            }
         }
 
         Ok(tree)
@@ -351,7 +391,7 @@ mod test {
         // add some new cards
         let nt = col.get_notetype_by_name("Cloze")?.unwrap();
         let mut note = nt.new_note();
-        note.fields[0] = "{{c1::}} {{c2::}} {{c3::}} {{c4::}}".into();
+        note.set_field(0, "{{c1::}} {{c2::}} {{c3::}} {{c4::}}")?;
         col.add_note(&mut note, child_deck.id)?;
 
         let tree = col.deck_tree(Some(TimestampSecs::now()), None)?;

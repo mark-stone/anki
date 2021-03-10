@@ -1,10 +1,11 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 import aqt
+from anki.collection import SearchNode
 from anki.consts import *
 from aqt.qt import *
-from aqt.utils import TR, showInfo, showWarning, tr
+from aqt.utils import TR, disable_help_button, showInfo, showWarning, tr
 
 RADIO_NEW = 1
 RADIO_REV = 2
@@ -20,7 +21,7 @@ TYPE_ALL = 3
 
 
 class CustomStudy(QDialog):
-    def __init__(self, mw) -> None:
+    def __init__(self, mw: aqt.AnkiQt) -> None:
         QDialog.__init__(self, mw)
         self.mw = mw
         self.deck = self.mw.col.decks.current()
@@ -28,12 +29,13 @@ class CustomStudy(QDialog):
         self.form = f = aqt.forms.customstudy.Ui_Dialog()
         self.created_custom_study = False
         f.setupUi(self)
+        disable_help_button(self)
         self.setWindowModality(Qt.WindowModal)
         self.setupSignals()
         f.radioNew.click()
         self.exec_()
 
-    def setupSignals(self):
+    def setupSignals(self) -> None:
         f = self.form
         qconnect(f.radioNew.clicked, lambda: self.onRadioChange(RADIO_NEW))
         qconnect(f.radioRev.clicked, lambda: self.onRadioChange(RADIO_REV))
@@ -42,7 +44,7 @@ class CustomStudy(QDialog):
         qconnect(f.radioPreview.clicked, lambda: self.onRadioChange(RADIO_PREVIEW))
         qconnect(f.radioCram.clicked, lambda: self.onRadioChange(RADIO_CRAM))
 
-    def onRadioChange(self, idx):
+    def onRadioChange(self, idx: int) -> None:
         f = self.form
         sp = f.spin
         smin = 1
@@ -54,10 +56,10 @@ class CustomStudy(QDialog):
         typeShow = False
         ok = tr(TR.CUSTOM_STUDY_OK)
 
-        def plus(num):
+        def plus(num: Union[int, str]) -> str:
             if num == 1000:
                 num = "1000+"
-            return "<b>" + str(num) + "</b>"
+            return f"<b>{str(num)}</b>"
 
         if idx == RADIO_NEW:
             new = self.mw.col.sched.totalNewForCurrentDeck()
@@ -121,7 +123,7 @@ class CustomStudy(QDialog):
         f.buttonBox.button(QDialogButtonBox.Ok).setText(ok)
         self.radioIdx = idx
 
-    def accept(self):
+    def accept(self) -> None:
         f = self.form
         i = self.radioIdx
         spin = f.spin.value()
@@ -130,13 +132,15 @@ class CustomStudy(QDialog):
             self.mw.col.decks.save(self.deck)
             self.mw.col.sched.extendLimits(spin, 0)
             self.mw.reset()
-            return QDialog.accept(self)
+            QDialog.accept(self)
+            return
         elif i == RADIO_REV:
             self.deck["extendRev"] = spin
             self.mw.col.decks.save(self.deck)
             self.mw.col.sched.extendLimits(0, spin)
             self.mw.reset()
-            return QDialog.accept(self)
+            QDialog.accept(self)
+            return
         elif i == RADIO_CRAM:
             tags = self._getTags()
         # the rest create a filtered deck
@@ -144,7 +148,8 @@ class CustomStudy(QDialog):
         if cur:
             if not cur["dyn"]:
                 showInfo(tr(TR.CUSTOM_STUDY_MUST_RENAME_DECK))
-                return QDialog.accept(self)
+                QDialog.accept(self)
+                return
             else:
                 # safe to empty
                 self.mw.col.sched.empty_filtered_deck(cur["id"])
@@ -158,26 +163,42 @@ class CustomStudy(QDialog):
             dyn = self.mw.col.decks.get(did)
         # and then set various options
         if i == RADIO_FORGOT:
-            dyn["terms"][0] = ["rated:%d:1" % spin, DYN_MAX_SIZE, DYN_RANDOM]
+            search = self.mw.col.build_search_string(
+                SearchNode(
+                    rated=SearchNode.Rated(days=spin, rating=SearchNode.RATING_AGAIN)
+                )
+            )
+            dyn["terms"][0] = [search, DYN_MAX_SIZE, DYN_RANDOM]
             dyn["resched"] = False
         elif i == RADIO_AHEAD:
-            dyn["terms"][0] = ["prop:due<=%d" % spin, DYN_MAX_SIZE, DYN_DUE]
+            search = self.mw.col.build_search_string(SearchNode(due_in_days=spin))
+            dyn["terms"][0] = [search, DYN_MAX_SIZE, DYN_DUE]
             dyn["resched"] = True
         elif i == RADIO_PREVIEW:
-            dyn["terms"][0] = ["is:new added:%s" % spin, DYN_MAX_SIZE, DYN_OLDEST]
+            search = self.mw.col.build_search_string(
+                SearchNode(card_state=SearchNode.CARD_STATE_NEW),
+                SearchNode(added_in_days=spin),
+            )
+            dyn["terms"][0] = [search, DYN_MAX_SIZE, DYN_OLDEST]
             dyn["resched"] = False
         elif i == RADIO_CRAM:
             type = f.cardType.currentRow()
             if type == TYPE_NEW:
-                terms = "is:new "
+                terms = self.mw.col.build_search_string(
+                    SearchNode(card_state=SearchNode.CARD_STATE_NEW)
+                )
                 ord = DYN_ADDED
                 dyn["resched"] = True
             elif type == TYPE_DUE:
-                terms = "is:due "
+                terms = self.mw.col.build_search_string(
+                    SearchNode(card_state=SearchNode.CARD_STATE_DUE)
+                )
                 ord = DYN_DUE
                 dyn["resched"] = True
             elif type == TYPE_REVIEW:
-                terms = "-is:new "
+                terms = self.mw.col.build_search_string(
+                    SearchNode(negated=SearchNode(card_state=SearchNode.CARD_STATE_NEW))
+                )
                 ord = DYN_RANDOM
                 dyn["resched"] = True
             else:
@@ -186,12 +207,15 @@ class CustomStudy(QDialog):
                 dyn["resched"] = False
             dyn["terms"][0] = [(terms + tags).strip(), spin, ord]
         # add deck limit
-        dyn["terms"][0][0] = 'deck:"%s" %s ' % (self.deck["name"], dyn["terms"][0][0])
+        dyn["terms"][0][0] = self.mw.col.build_search_string(
+            dyn["terms"][0][0], SearchNode(deck=self.deck["name"])
+        )
         self.mw.col.decks.save(dyn)
         # generate cards
         self.created_custom_study = True
         if not self.mw.col.sched.rebuild_filtered_deck(dyn["id"]):
-            return showWarning(tr(TR.CUSTOM_STUDY_NO_CARDS_MATCHED_THE_CRITERIA_YOU))
+            showWarning(tr(TR.CUSTOM_STUDY_NO_CARDS_MATCHED_THE_CRITERIA_YOU))
+            return
         self.mw.moveToState("overview")
         QDialog.accept(self)
 
@@ -202,7 +226,7 @@ class CustomStudy(QDialog):
             # fixme: clean up the empty custom study deck
         QDialog.reject(self)
 
-    def _getTags(self):
+    def _getTags(self) -> str:
         from aqt.taglimit import TagLimit
 
         return TagLimit(self.mw, self).tags

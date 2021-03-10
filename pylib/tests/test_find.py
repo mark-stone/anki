@@ -1,8 +1,8 @@
 # coding: utf-8
 import pytest
 
+from anki.collection import BuiltinSort, Config
 from anki.consts import *
-from anki.rsbackend import BuiltinSortKind
 from tests.shared import getEmptyCol, isNearCutoff
 
 
@@ -61,7 +61,7 @@ def test_findCards():
     assert len(col.findCards("tag:monkey")) == 1
     assert len(col.findCards("tag:sheep -tag:monkey")) == 1
     assert len(col.findCards("-tag:sheep")) == 4
-    col.tags.bulkAdd(col.db.list("select id from notes"), "foo bar")
+    col.tags.bulk_add(col.db.list("select id from notes"), "foo bar")
     assert len(col.findCards("tag:foo")) == len(col.findCards("tag:bar")) == 5
     col.tags.bulkRem(col.db.list("select id from notes"), "foo")
     assert len(col.findCards("tag:foo")) == 0
@@ -121,16 +121,14 @@ def test_findCards():
     col.flush()
     assert col.findCards("", order=True)[-1] in latestCardIds
     assert col.findCards("", order=True)[0] == firstCardId
-    col.conf["sortBackwards"] = True
+    col.set_config_bool(Config.Bool.BROWSER_SORT_BACKWARDS, True)
     col.flush()
     assert col.findCards("", order=True)[0] in latestCardIds
     assert (
-        col.find_cards("", order=BuiltinSortKind.CARD_DUE, reverse=False)[0]
-        == firstCardId
+        col.find_cards("", order=BuiltinSort.CARD_DUE, reverse=False)[0] == firstCardId
     )
     assert (
-        col.find_cards("", order=BuiltinSortKind.CARD_DUE, reverse=True)[0]
-        != firstCardId
+        col.find_cards("", order=BuiltinSort.CARD_DUE, reverse=True)[0] != firstCardId
     )
     # model
     assert len(col.findCards("note:basic")) == 3
@@ -193,6 +191,7 @@ def test_findCards():
     assert len(col.findCards("-prop:ease>2")) > 1
     # recently failed
     if not isNearCutoff():
+        # rated
         assert len(col.findCards("rated:1:1")) == 0
         assert len(col.findCards("rated:1:2")) == 0
         c = col.sched.getCard()
@@ -204,13 +203,14 @@ def test_findCards():
         assert len(col.findCards("rated:1:1")) == 1
         assert len(col.findCards("rated:1:2")) == 1
         assert len(col.findCards("rated:1")) == 2
-        assert len(col.findCards("rated:0:2")) == 0
         assert len(col.findCards("rated:2:2")) == 1
+        assert len(col.findCards("rated:0")) == len(col.findCards("rated:1"))
+
         # added
-        assert len(col.findCards("added:0")) == 0
         col.db.execute("update cards set id = id - 86400*1000 where id = ?", id)
         assert len(col.findCards("added:1")) == col.cardCount() - 1
         assert len(col.findCards("added:2")) == col.cardCount()
+        assert len(col.findCards("added:0")) == len(col.findCards("added:1"))
     else:
         print("some find tests disabled near cutoff")
     # empty field

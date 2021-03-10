@@ -165,7 +165,7 @@ hooks = [
     ),
     Hook(
         name="debug_console_did_evaluate_python",
-        args=["output: str", "query: str", "debug_window: QDialog"],
+        args=["output: str", "query: str", "debug_window: aqt.forms.debug.Ui_Dialog"],
         return_type="str",
         doc="""Allows processing the debug result. E.g. logging queries and
         result, saving last query to display it later...""",
@@ -274,6 +274,12 @@ hooks = [
     ),
     # Browser
     ###################
+    Hook(
+        name="default_search",
+        args=["current_search: str", "c: Card"],
+        return_type="str",
+        doc="Change the default search when the card browser is opened with card `c`.",
+    ),
     Hook(name="browser_will_show", args=["browser: aqt.browser.Browser"]),
     Hook(
         name="browser_menus_did_init",
@@ -298,8 +304,8 @@ hooks = [
         name="browser_will_build_tree",
         args=[
             "handled: bool",
-            "tree: aqt.browser.SidebarItem",
-            "stage: aqt.browser.SidebarStage",
+            "tree: aqt.sidebar.SidebarItem",
+            "stage: aqt.sidebar.SidebarStage",
             "browser: aqt.browser.Browser",
         ],
         return_type="bool",
@@ -310,7 +316,7 @@ hooks = [
         'stage' is an enum describing the different construction stages of
         the sidebar tree at which you can interject your changes.
         The different values can be inspected by looking at
-        aqt.browser.SidebarStage.
+        aqt.sidebar.SidebarStage.
         
         If you want Anki to proceed with the construction of the tree stage
         in question after your have performed your changes or additions,

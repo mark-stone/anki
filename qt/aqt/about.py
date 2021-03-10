@@ -1,33 +1,34 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 import platform
 import time
 
 import aqt.forms
+from anki.lang import without_unicode_isolation
 from anki.utils import versionWithBuild
 from aqt.addons import AddonManager, AddonMeta
 from aqt.qt import *
-from aqt.utils import TR, supportText, tooltip, tr
+from aqt.utils import TR, disable_help_button, supportText, tooltip, tr
 
 
 class ClosableQDialog(QDialog):
-    def reject(self):
+    def reject(self) -> None:
         aqt.dialogs.markClosed("About")
         QDialog.reject(self)
 
-    def accept(self):
+    def accept(self) -> None:
         aqt.dialogs.markClosed("About")
         QDialog.accept(self)
 
-    def closeWithCallback(self, callback):
+    def closeWithCallback(self, callback: Callable[[], None]) -> None:
         self.reject()
         callback()
 
 
-def show(mw):
+def show(mw: aqt.AnkiQt) -> QDialog:
     dialog = ClosableQDialog(mw)
-    mw.setupDialogGC(dialog)
+    disable_help_button(dialog)
+    mw.garbage_collect_on_dialog_finish(dialog)
     abt = aqt.forms.about.Ui_About()
     abt.setupUi(dialog)
 
@@ -53,7 +54,7 @@ def show(mw):
             modified = "mod"
         return f"{name} ['{addon.dir_name}', {installed}, '{addon.human_version}', {modified}]"
 
-    def onCopy():
+    def onCopy() -> None:
         addmgr = mw.addonManager
         active = []
         activeids = []
@@ -80,7 +81,7 @@ def show(mw):
 (add-on provided name [Add-on folder, installed at, version, is config changed])
 {newline.join(sorted(inactive))}
 """
-        info = "    " + "    ".join(info.splitlines(True))
+        info = f"    {'    '.join(info.splitlines(True))}"
         QApplication.clipboard().setText(info)
         tooltip(tr(TR.ABOUT_COPIED_TO_CLIPBOARD), parent=dialog)
 
@@ -92,15 +93,18 @@ def show(mw):
     # WebView contents
     ######################################################################
     abouttext = "<center><img src='/_anki/imgs/anki-logo-thin.png'></center>"
-    abouttext += "<p>" + tr(TR.ABOUT_ANKI_IS_A_FRIENDLY_INTELLIGENT_SPACED)
-    abouttext += "<p>" + tr(TR.ABOUT_ANKI_IS_LICENSED_UNDER_THE_AGPL3)
-    abouttext += "<p>" + tr(TR.ABOUT_VERSION, val=versionWithBuild()) + "<br>"
+    abouttext += f"<p>{tr(TR.ABOUT_ANKI_IS_A_FRIENDLY_INTELLIGENT_SPACED)}"
+    abouttext += f"<p>{tr(TR.ABOUT_ANKI_IS_LICENSED_UNDER_THE_AGPL3)}"
+    abouttext += f"<p>{tr(TR.ABOUT_VERSION, val=versionWithBuild())}<br>"
     abouttext += ("Python %s Qt %s PyQt %s<br>") % (
         platform.python_version(),
         QT_VERSION_STR,
         PYQT_VERSION_STR,
     )
-    abouttext += tr(TR.ABOUT_VISIT_WEBSITE, val=aqt.appWebsite) + "</span>"
+    abouttext += (
+        without_unicode_isolation(tr(TR.ABOUT_VISIT_WEBSITE, val=aqt.appWebsite))
+        + "</span>"
+    )
 
     # automatically sorted; add new lines at the end
     allusers = sorted(
@@ -200,14 +204,15 @@ def show(mw):
             "Junseo Park",
             "Gustavo Costa",
             "余时行",
+            "叶峻峣",
         )
     )
 
     abouttext += "<p>" + tr(
         TR.ABOUT_WRITTEN_BY_DAMIEN_ELMES_WITH_PATCHES, cont=", ".join(allusers)
     )
-    abouttext += "<p>" + tr(TR.ABOUT_IF_YOU_HAVE_CONTRIBUTED_AND_ARE)
-    abouttext += "<p>" + tr(TR.ABOUT_A_BIG_THANKS_TO_ALL_THE)
+    abouttext += f"<p>{tr(TR.ABOUT_IF_YOU_HAVE_CONTRIBUTED_AND_ARE)}"
+    abouttext += f"<p>{tr(TR.ABOUT_A_BIG_THANKS_TO_ALL_THE)}"
     abt.label.setMinimumWidth(800)
     abt.label.setMinimumHeight(600)
     dialog.show()

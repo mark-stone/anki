@@ -23,9 +23,14 @@ genrule(
     ],
 )
 
-aqt_srcs = glob([
-    "**/*.py",
-]) + [
+_py_srcs = glob(
+    [
+        "**/*.py",
+    ],
+    exclude = ["hooks_gen.py"],
+)
+
+_py_srcs_and_forms = _py_srcs + [
     "//qt/aqt/forms:forms",
     "//qt/aqt/forms:icons",
 ]
@@ -52,6 +57,7 @@ aqt_deps = [
     "@bazel_tools//src/conditions:host_windows": [
         requirement("psutil"),
         requirement("pywin32"),
+        requirement("winrt"),
     ],
     "//conditions:default": [],
 })
@@ -59,7 +65,7 @@ aqt_deps = [
 # library without web/i18n data; faster for testing
 py_library(
     name = "aqt_without_data",
-    srcs = aqt_srcs,
+    srcs = _py_srcs_and_forms,
     data = aqt_core_data,
     visibility = ["//visibility:public"],
     deps = aqt_deps,
@@ -67,7 +73,7 @@ py_library(
 
 py_library(
     name = "aqt_with_data",
-    srcs = aqt_srcs,
+    srcs = _py_srcs_and_forms,
     data = aqt_core_data + ["//qt/aqt/data"],
     visibility = ["//visibility:public"],
     deps = aqt_deps,
@@ -87,12 +93,14 @@ py_wheel(
     name = "wheel",
     description_file = "wheel_description.txt",
     distribution = "aqt",
+    entry_points = {
+        "console_scripts": ["anki = aqt:run"],
+    },
     homepage = "https://apps.ankiweb.net",
     license = "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     python_tag = "py3",
     python_version = ">=3.8",
     requires = [
-        # "pyaudio", # currently off as a pain to install on Windows for code completion
         "beautifulsoup4",
         "requests",
         "send2trash",
@@ -105,12 +113,16 @@ py_wheel(
         "pyqtwebengine",
         'psutil; sys.platform == "win32"',
         'pywin32; sys.platform == "win32"',
+        'winrt==1.0.20239.1; sys.platform == "win32" and platform_release == "10" and python_version == "3.8"',
+        'winrt; sys.platform == "win32" and platform_release == "10" and python_version >= "3.9"',
         "anki==" + anki_version,
     ],
     strip_path_prefixes = [
-        "qt",
+        "qt/",
     ],
+    tags = ["manual"],
     version = anki_version,
+    visibility = ["//visibility:public"],
     deps = [
         ":aqt_pkg",
     ],
@@ -118,8 +130,8 @@ py_wheel(
 
 filegroup(
     name = "py_source_files",
-    srcs = glob(["**/*.py"]),
+    srcs = _py_srcs,
     visibility = [
-        "//qt/po:__pkg__",
+        "//qt:__subpackages__",
     ],
 )

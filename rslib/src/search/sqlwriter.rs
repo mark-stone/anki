@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::parser::{Node, PropertyKind, SearchNode, StateKind, TemplateKind};
+use super::parser::{Node, PropertyKind, RatingKind, SearchNode, StateKind, TemplateKind};
 use crate::{
     card::{CardQueue, CardType},
     collection::Collection,
@@ -9,9 +9,10 @@ use crate::{
     err::Result,
     notes::field_checksum,
     notetype::NoteTypeID,
+    prelude::*,
     storage::ids_to_string,
     text::{
-        escape_sql, is_glob, matches_glob, normalize_to_nfc, strip_html_preserving_media_filenames,
+        is_glob, matches_glob, normalize_to_nfc, strip_html_preserving_media_filenames,
         to_custom_re, to_re, to_sql, to_text, without_combining,
     },
     timestamp::TimestampSecs,
@@ -28,7 +29,7 @@ pub(crate) struct SqlWriter<'a> {
 
 impl SqlWriter<'_> {
     pub(crate) fn new(col: &mut Collection) -> SqlWriter<'_> {
-        let normalize_note_text = col.normalize_note_text();
+        let normalize_note_text = col.get_bool(BoolKey::NormalizeNoteText);
         let sql = String::new();
         let args = vec![];
         SqlWriter {
@@ -123,7 +124,7 @@ impl SqlWriter<'_> {
                 self.write_single_field(&norm(field), &self.norm_note(text), *is_re)?
             }
             SearchNode::Duplicates { note_type_id, text } => {
-                self.write_dupes(*note_type_id, &self.norm_note(text))?
+                self.write_dupe(*note_type_id, &self.norm_note(text))?
             }
             SearchNode::Regex(re) => self.write_regex(&self.norm_note(re)),
             SearchNode::NoCombining(text) => self.write_no_combining(&self.norm_note(text)),
@@ -134,7 +135,9 @@ impl SqlWriter<'_> {
             SearchNode::EditedInDays(days) => self.write_edited(*days)?,
             SearchNode::CardTemplate(template) => match template {
                 TemplateKind::Ordinal(_) => self.write_template(template)?,
-                TemplateKind::Name(name) => self.write_template(&TemplateKind::Name(norm(name)))?,
+                TemplateKind::Name(name) => {
+                    self.write_template(&TemplateKind::Name(norm(name).into()))?
+                }
             },
             SearchNode::Deck(deck) => self.write_deck(&norm(deck))?,
             SearchNode::NoteTypeID(ntid) => {
@@ -144,7 +147,7 @@ impl SqlWriter<'_> {
                 write!(self.sql, "c.did = {}", did).unwrap();
             }
             SearchNode::NoteType(notetype) => self.write_note_type(&norm(notetype))?,
-            SearchNode::Rated { days, ease } => self.write_rated(*days, *ease)?,
+            SearchNode::Rated { days, ease } => self.write_rated(">", -i64::from(*days), ease)?,
 
             SearchNode::Tag(tag) => self.write_tag(&norm(tag))?,
             SearchNode::State(state) => self.write_state(state)?,
@@ -194,19 +197,16 @@ impl SqlWriter<'_> {
             write!(self.sql, "false").unwrap();
         } else {
             match text {
-                "none" => write!(self.sql, "n.tags = ''").unwrap(),
-                "*" => write!(self.sql, "true").unwrap(),
-                s => {
-                    if is_glob(s) {
-                        write!(self.sql, "n.tags regexp ?").unwrap();
-                        let re = &to_custom_re(s, r"\S");
-                        self.args.push(format!("(?i).* {} .*", re));
-                    } else if let Some(tag) = self.col.storage.preferred_tag_case(&to_text(s))? {
-                        write!(self.sql, "n.tags like ? escape '\\'").unwrap();
-                        self.args.push(format!("% {} %", escape_sql(&tag)));
-                    } else {
-                        write!(self.sql, "false").unwrap();
-                    }
+                "none" => {
+                    write!(self.sql, "n.tags = ''").unwrap();
+                }
+                "*" => {
+                    write!(self.sql, "true").unwrap();
+                }
+                text => {
+                    write!(self.sql, "n.tags regexp ?").unwrap();
+                    let re = &to_custom_re(text, r"\S");
+                    self.args.push(format!("(?i).* {}(::| ).*", re));
                 }
             }
         }
@@ -214,47 +214,84 @@ impl SqlWriter<'_> {
         Ok(())
     }
 
-    fn write_rated(&mut self, days: u32, ease: Option<u8>) -> Result<()> {
+    fn write_rated(&mut self, op: &str, days: i64, ease: &RatingKind) -> Result<()> {
         let today_cutoff = self.col.timing_today()?.next_day_at;
-        let days = days.min(365) as i64;
-        let target_cutoff_ms = (today_cutoff - 86_400 * days) * 1_000;
-        write!(
-            self.sql,
-            "c.id in (select cid from revlog where id>{}",
-            target_cutoff_ms
-        )
-        .unwrap();
-        if let Some(ease) = ease {
-            write!(self.sql, " and ease={})", ease).unwrap();
-        } else {
-            write!(self.sql, ")").unwrap();
+        let target_cutoff_ms = (today_cutoff + 86_400 * days) * 1_000;
+        let day_before_cutoff_ms = (today_cutoff + 86_400 * (days - 1)) * 1_000;
+
+        write!(self.sql, "c.id in (select cid from revlog where id").unwrap();
+
+        match op {
+            ">" => write!(self.sql, " >= {}", target_cutoff_ms),
+            ">=" => write!(self.sql, " >= {}", day_before_cutoff_ms),
+            "<" => write!(self.sql, " < {}", day_before_cutoff_ms),
+            "<=" => write!(self.sql, " < {}", target_cutoff_ms),
+            "=" => write!(
+                self.sql,
+                " between {} and {}",
+                day_before_cutoff_ms,
+                target_cutoff_ms - 1
+            ),
+            "!=" => write!(
+                self.sql,
+                " not between {} and {}",
+                day_before_cutoff_ms,
+                target_cutoff_ms - 1
+            ),
+            _ => unreachable!("unexpected op"),
         }
+        .unwrap();
+
+        match ease {
+            RatingKind::AnswerButton(u) => write!(self.sql, " and ease = {})", u),
+            RatingKind::AnyAnswerButton => write!(self.sql, " and ease > 0)"),
+            RatingKind::ManualReschedule => write!(self.sql, " and ease = 0)"),
+        }
+        .unwrap();
 
         Ok(())
     }
 
     fn write_prop(&mut self, op: &str, kind: &PropertyKind) -> Result<()> {
         let timing = self.col.timing_today()?;
+
         match kind {
             PropertyKind::Due(days) => {
                 let day = days + (timing.days_elapsed as i32);
                 write!(
                     self.sql,
-                    "(c.queue in ({rev},{daylrn}) and due {op} {day})",
+                    // SQL does integer division if both parameters are integers
+                    "(\
+                    (c.queue in ({rev},{daylrn}) and c.due {op} {day}) or \
+                    (c.queue in ({lrn},{previewrepeat}) and ((c.due - {cutoff}) / 86400) {op} {days})\
+                    )",
                     rev = CardQueue::Review as u8,
                     daylrn = CardQueue::DayLearn as u8,
                     op = op,
-                    day = day
-                )
+                    day = day,
+                    lrn = CardQueue::Learn as i8,
+                    previewrepeat = CardQueue::PreviewRepeat as i8,
+                    cutoff = timing.next_day_at,
+                    days = days
+                ).unwrap()
             }
-            PropertyKind::Interval(ivl) => write!(self.sql, "ivl {} {}", op, ivl),
-            PropertyKind::Reps(reps) => write!(self.sql, "reps {} {}", op, reps),
-            PropertyKind::Lapses(days) => write!(self.sql, "lapses {} {}", op, days),
+            PropertyKind::Position(pos) => write!(
+                self.sql,
+                "(c.type = {t} and due {op} {pos})",
+                t = CardType::New as u8,
+                op = op,
+                pos = pos
+            )
+            .unwrap(),
+            PropertyKind::Interval(ivl) => write!(self.sql, "ivl {} {}", op, ivl).unwrap(),
+            PropertyKind::Reps(reps) => write!(self.sql, "reps {} {}", op, reps).unwrap(),
+            PropertyKind::Lapses(days) => write!(self.sql, "lapses {} {}", op, days).unwrap(),
             PropertyKind::Ease(ease) => {
-                write!(self.sql, "factor {} {}", op, (ease * 1000.0) as u32)
+                write!(self.sql, "factor {} {}", op, (ease * 1000.0) as u32).unwrap()
             }
+            PropertyKind::Rated(days, ease) => self.write_rated(op, i64::from(*days), ease)?,
         }
-        .unwrap();
+
         Ok(())
     }
 
@@ -270,9 +307,9 @@ impl SqlWriter<'_> {
             ),
             StateKind::Learning => write!(
                 self.sql,
-                "c.queue in ({},{})",
-                CardQueue::Learn as i8,
-                CardQueue::DayLearn as i8
+                "c.type in ({}, {})",
+                CardType::Learn as i8,
+                CardType::Relearn as i8,
             ),
             StateKind::Buried => write!(
                 self.sql,
@@ -283,14 +320,15 @@ impl SqlWriter<'_> {
             StateKind::Suspended => write!(self.sql, "c.queue = {}", CardQueue::Suspended as i8),
             StateKind::Due => write!(
                 self.sql,
-                "(
-    (c.queue in ({rev},{daylrn}) and c.due <= {today}) or
-    (c.queue = {lrn} and c.due <= {learncutoff})
-    )",
+                "(\
+                (c.queue in ({rev},{daylrn}) and c.due <= {today}) or \
+                (c.queue in ({lrn},{previewrepeat}) and c.due <= {learncutoff})\
+                )",
                 rev = CardQueue::Review as i8,
                 daylrn = CardQueue::DayLearn as i8,
                 today = timing.days_elapsed,
                 lrn = CardQueue::Learn as i8,
+                previewrepeat = CardQueue::PreviewRepeat as i8,
                 learncutoff = TimestampSecs::now().0 + (self.col.learn_ahead_secs() as i64),
             ),
             StateKind::UserBuried => write!(self.sql, "c.queue = {}", CardQueue::UserBuried as i8),
@@ -423,7 +461,7 @@ impl SqlWriter<'_> {
         Ok(())
     }
 
-    fn write_dupes(&mut self, ntid: NoteTypeID, text: &str) -> Result<()> {
+    fn write_dupe(&mut self, ntid: NoteTypeID, text: &str) -> Result<()> {
         let text_nohtml = strip_html_preserving_media_filenames(text);
         let csum = field_checksum(text_nohtml.as_ref());
 
@@ -497,7 +535,7 @@ impl RequiredTable {
     }
 }
 
-impl Node<'_> {
+impl Node {
     fn required_table(&self) -> RequiredTable {
         match self {
             Node::And => RequiredTable::CardsOrNotes,
@@ -511,7 +549,7 @@ impl Node<'_> {
     }
 }
 
-impl SearchNode<'_> {
+impl SearchNode {
     fn required_table(&self) -> RequiredTable {
         match self {
             SearchNode::AddedInDays(_) => RequiredTable::Cards,
@@ -549,7 +587,6 @@ mod test {
         collection::{open_collection, Collection},
         i18n::I18n,
         log,
-        types::Usn,
     };
     use std::{fs, path::PathBuf};
     use tempfile::tempdir;
@@ -619,6 +656,7 @@ mod test {
             s(ctx, "added:3").0,
             format!("(c.id > {})", (timing.next_day_at - (86_400 * 3)) * 1_000)
         );
+        assert_eq!(s(ctx, "added:0").0, s(ctx, "added:1").0,);
 
         // deck
         assert_eq!(
@@ -659,26 +697,27 @@ mod test {
         // dupes
         assert_eq!(s(ctx, "dupe:123,test"), ("(n.id in ())".into(), vec![]));
 
-        // if registered, searches with canonical
-        ctx.transact(None, |col| col.register_tag("One", Usn(-1)))
-            .unwrap();
+        // tags
         assert_eq!(
             s(ctx, r"tag:one"),
             (
-                "(n.tags like ? escape '\\')".into(),
-                vec![r"% One %".into()]
+                "(n.tags regexp ?)".into(),
+                vec!["(?i).* one(::| ).*".into()]
+            )
+        );
+        assert_eq!(
+            s(ctx, r"tag:foo::bar"),
+            (
+                "(n.tags regexp ?)".into(),
+                vec!["(?i).* foo::bar(::| ).*".into()]
             )
         );
 
-        // unregistered tags without wildcards won't match
-        assert_eq!(s(ctx, "tag:unknown"), ("(false)".into(), vec![]));
-
-        // wildcards force a regexp search
         assert_eq!(
             s(ctx, r"tag:o*n\*et%w%oth_re\_e"),
             (
                 "(n.tags regexp ?)".into(),
-                vec![r"(?i).* o\S*n\*et%w%oth\Sre_e .*".into()]
+                vec![r"(?i).* o\S*n\*et%w%oth\Sre_e(::| ).*".into()]
             )
         );
         assert_eq!(s(ctx, "tag:none"), ("(n.tags = '')".into(), vec![]));
@@ -698,15 +737,25 @@ mod test {
         assert_eq!(
             s(ctx, "rated:2").0,
             format!(
-                "(c.id in (select cid from revlog where id>{}))",
+                "(c.id in (select cid from revlog where id >= {} and ease > 0))",
                 (timing.next_day_at - (86_400 * 2)) * 1_000
             )
         );
         assert_eq!(
             s(ctx, "rated:400:1").0,
             format!(
-                "(c.id in (select cid from revlog where id>{} and ease=1))",
-                (timing.next_day_at - (86_400 * 365)) * 1_000
+                "(c.id in (select cid from revlog where id >= {} and ease = 1))",
+                (timing.next_day_at - (86_400 * 400)) * 1_000
+            )
+        );
+        assert_eq!(s(ctx, "rated:0").0, s(ctx, "rated:1").0);
+
+        // resched
+        assert_eq!(
+            s(ctx, "resched:400").0,
+            format!(
+                "(c.id in (select cid from revlog where id >= {} and ease = 0))",
+                (timing.next_day_at - (86_400 * 400)) * 1_000
             )
         );
 
@@ -716,10 +765,12 @@ mod test {
         assert_eq!(
             s(ctx, "prop:due!=-1").0,
             format!(
-                "((c.queue in (2,3) and due != {}))",
-                timing.days_elapsed - 1
+                "(((c.queue in (2,3) and c.due != {days}) or (c.queue in (1,4) and ((c.due - {cutoff}) / 86400) != -1)))",
+                days = timing.days_elapsed - 1,
+                cutoff = timing.next_day_at
             )
         );
+        assert_eq!(s(ctx, "prop:rated>-5:3").0, s(ctx, "rated:5:3").0);
 
         // note types by name
         assert_eq!(

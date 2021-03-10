@@ -1,12 +1,15 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from __future__ import annotations
+
 import io
-import locale
 import pickle
 import random
 import shutil
 import traceback
+import warnings
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from send2trash import send2trash
@@ -17,16 +20,55 @@ import aqt.sound
 from anki import Collection
 from anki.db import DB
 from anki.lang import without_unicode_isolation
-from anki.rsbackend import SyncAuth
+from anki.sync import SyncAuth
 from anki.utils import intTime, isMac, isWin
 from aqt import appHelpSite
 from aqt.qt import *
-from aqt.utils import TR, locale_dir, showWarning, tr
+from aqt.utils import TR, disable_help_button, locale_dir, showWarning, tr
 
 # Profile handling
 ##########################################################################
 # - Saves in pickles rather than json to easily store Qt window state.
 # - Saves in sqlite rather than a flat file so the config can't be corrupted
+
+
+class RecordingDriver(Enum):
+    PyAudio = "PyAudio"
+    QtAudioInput = "Qt"
+
+
+class VideoDriver(Enum):
+    OpenGL = "auto"
+    ANGLE = "angle"
+    Software = "software"
+
+    @staticmethod
+    def default_for_platform() -> VideoDriver:
+        if isMac:
+            return VideoDriver.OpenGL
+        else:
+            return VideoDriver.Software
+
+    def constrained_to_platform(self) -> VideoDriver:
+        if self == VideoDriver.ANGLE and not isWin:
+            return VideoDriver.Software
+        return self
+
+    def next(self) -> VideoDriver:
+        if self == VideoDriver.Software:
+            return VideoDriver.OpenGL
+        elif self == VideoDriver.OpenGL and isWin:
+            return VideoDriver.ANGLE
+        else:
+            return VideoDriver.Software
+
+    @staticmethod
+    def all_for_platform() -> List[VideoDriver]:
+        all = [VideoDriver.OpenGL]
+        if isWin:
+            all.append(VideoDriver.ANGLE)
+        all.append(VideoDriver.Software)
+        return all
 
 
 metaConf = dict(
@@ -47,14 +89,8 @@ profileConf: Dict[str, Any] = dict(
     numBackups=50,
     lastOptimize=intTime(),
     # editing
-    fullSearch=False,
     searchHistory=[],
     lastColour="#00f",
-    stripHTML=True,
-    pastePNG=False,
-    # not exposed in gui
-    deleteMedia=False,
-    preserveKeyboard=True,
     # syncing
     syncKey=None,
     syncMedia=True,
@@ -62,6 +98,10 @@ profileConf: Dict[str, Any] = dict(
     # importing
     allowHTML=False,
     importMode=1,
+    # these are not used, but Anki 2.1.42 and below
+    # expect these keys to exist
+    stripHTML=True,
+    deleteMedia=False,
 )
 
 
@@ -71,17 +111,17 @@ class LoadMetaResult:
 
 
 class AnkiRestart(SystemExit):
-    def __init__(self, *args, **kwargs):
-        self.exitcode = kwargs.pop("exitcode", 0)
-        super().__init__(*args, **kwargs)  # type: ignore
+    def __init__(self, exitcode: int = 0) -> None:
+        self.exitcode = exitcode
+        super().__init__()
 
 
 class ProfileManager:
-    def __init__(self, base=None):
+    def __init__(self, base: Optional[str] = None) -> None:  #
         ## Settings which should be forgotten each Anki restart
-        self.session = {}
-        self.name = None
-        self.db = None
+        self.session: Dict[str, Any] = {}
+        self.name: Optional[str] = None
+        self.db: Optional[DB] = None
         self.profile: Optional[Dict] = None
         # instantiate base folder
         self.base: str
@@ -94,7 +134,7 @@ class ProfileManager:
         return res
 
     # profile load on startup
-    def openProfile(self, profile) -> None:
+    def openProfile(self, profile: str) -> None:
         if profile:
             if profile not in self.profiles():
                 QMessageBox.critical(
@@ -128,7 +168,7 @@ class ProfileManager:
                 return p
             return os.path.expanduser("~/Documents/Anki")
 
-    def maybeMigrateFolder(self):
+    def maybeMigrateFolder(self) -> None:
         newBase = self.base
         oldBase = self._oldFolderLocation()
 
@@ -143,7 +183,7 @@ class ProfileManager:
                 self.base = newBase
                 shutil.move(oldBase, self.base)
 
-    def _tryToMigrateFolder(self, oldBase):
+    def _tryToMigrateFolder(self, oldBase: str) -> None:
         from PyQt5 import QtGui, QtWidgets
 
         app = QtWidgets.QApplication([])
@@ -164,7 +204,7 @@ class ProfileManager:
         confirmation.setText(
             "Anki needs to move its data folder from Documents/Anki to a new location. Proceed?"
         )
-        retval = confirmation.exec()
+        retval = confirmation.exec_()
 
         if retval == QMessageBox.Ok:
             progress = QMessageBox()
@@ -186,7 +226,7 @@ class ProfileManager:
             completion.setWindowTitle(window_title)
             completion.setText("Migration complete. Please start Anki again.")
             completion.show()
-            completion.exec()
+            completion.exec_()
         else:
             diag = QMessageBox()
             diag.setIcon(QMessageBox.Warning)
@@ -197,7 +237,7 @@ class ProfileManager:
                 "Migration aborted. If you would like to keep the old folder location, please "
                 "see the Startup Options section of the manual. Anki will now quit."
             )
-            diag.exec()
+            diag.exec_()
 
         raise AnkiRestart(exitcode=0)
 
@@ -215,7 +255,7 @@ class ProfileManager:
 
         return n
 
-    def _unpickle(self, data) -> Any:
+    def _unpickle(self, data: bytes) -> Any:
         class Unpickler(pickle.Unpickler):
             def find_class(self, module: str, name: str) -> Any:
                 if module == "PyQt5.sip":
@@ -227,7 +267,7 @@ class ProfileManager:
                 fn = super().find_class(module, name)
                 if module == "sip" and name == "_unpickle_type":
 
-                    def wrapper(mod, obj, args):
+                    def wrapper(mod, obj, args) -> Any:  # type: ignore
                         if mod.startswith("PyQt4") and obj == "QByteArray":
                             # can't trust str objects from python 2
                             return QByteArray()
@@ -240,10 +280,15 @@ class ProfileManager:
         up = Unpickler(io.BytesIO(data), errors="ignore")
         return up.load()
 
-    def _pickle(self, obj) -> Any:
-        return pickle.dumps(obj, protocol=0)
+    def _pickle(self, obj: Any) -> bytes:
+        # pyqt needs to be updated to fix
+        # 'PY_SSIZE_T_CLEAN will be required for '#' formats' warning
+        # check if this is still required for pyqt6
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return pickle.dumps(obj, protocol=4)
 
-    def load(self, name) -> bool:
+    def load(self, name: str) -> bool:
         assert name != "_global"
         data = self.db.scalar(
             "select cast(data as blob) from profiles where name = ?", name
@@ -269,14 +314,14 @@ class ProfileManager:
         self.db.execute(sql, self._pickle(self.meta), "_global")
         self.db.commit()
 
-    def create(self, name) -> None:
+    def create(self, name: str) -> None:
         prof = profileConf.copy()
         self.db.execute(
             "insert or ignore into profiles values (?, ?)", name, self._pickle(prof)
         )
         self.db.commit()
 
-    def remove(self, name) -> None:
+    def remove(self, name: str) -> None:
         p = self.profileFolder()
         if os.path.exists(p):
             send2trash(p)
@@ -288,7 +333,7 @@ class ProfileManager:
         if os.path.exists(p):
             send2trash(p)
 
-    def rename(self, name) -> None:
+    def rename(self, name: str) -> None:
         oldName = self.name
         oldFolder = self.profileFolder()
         self.name = name
@@ -332,7 +377,7 @@ class ProfileManager:
     # Folder handling
     ######################################################################
 
-    def profileFolder(self, create=True) -> str:
+    def profileFolder(self, create: bool = True) -> str:
         path = os.path.join(self.base, self.name)
         if create:
             self._ensureExists(path)
@@ -350,7 +395,7 @@ class ProfileManager:
     # Downgrade
     ######################################################################
 
-    def downgrade(self, profiles=List[str]) -> List[str]:
+    def downgrade(self, profiles: List[str]) -> List[str]:
         "Downgrade all profiles. Return a list of profiles that couldn't be opened."
         problem_profiles = []
         for name in profiles:
@@ -377,7 +422,7 @@ class ProfileManager:
             os.makedirs(path)
         return path
 
-    def _setBaseFolder(self, cmdlineBase: None) -> None:
+    def _setBaseFolder(self, cmdlineBase: Optional[str]) -> None:
         if cmdlineBase:
             self.base = os.path.abspath(cmdlineBase)
         elif os.environ.get("ANKI_BASE"):
@@ -402,7 +447,7 @@ class ProfileManager:
                 os.makedirs(dataDir)
             return os.path.join(dataDir, "Anki2")
 
-    def _loadMeta(self, retrying=False) -> LoadMetaResult:
+    def _loadMeta(self, retrying: bool = False) -> LoadMetaResult:
         result = LoadMetaResult()
         result.firstTime = False
         result.loadError = retrying
@@ -433,7 +478,7 @@ class ProfileManager:
             self.db.execute(
                 """
 create table if not exists profiles
-(name text primary key, data text not null);"""
+(name text primary key, data blob not null);"""
             )
             data = self.db.scalar(
                 "select cast(data as blob) from profiles where name = '_global'"
@@ -475,7 +520,7 @@ create table if not exists profiles
                 without_unicode_isolation(
                     tr(
                         TR.PROFILES_FOLDER_README,
-                        link=appHelpSite + "files?id=startup-options",
+                        link=f"{appHelpSite}files?id=startup-options",
                     )
                 )
             )
@@ -487,12 +532,13 @@ create table if not exists profiles
     def setDefaultLang(self, idx: int) -> None:
         # create dialog
         class NoCloseDiag(QDialog):
-            def reject(self):
+            def reject(self) -> None:
                 pass
 
         d = self.langDiag = NoCloseDiag()
         f = self.langForm = aqt.forms.setlang.Ui_Dialog()
         f.setupUi(d)
+        disable_help_button(d)
         qconnect(d.accepted, self._onLangSelected)
         qconnect(d.rejected, lambda: True)
         # update list
@@ -512,7 +558,7 @@ create table if not exists profiles
             return self.setDefaultLang(f.lang.currentRow())
         self.setLang(code)
 
-    def setLang(self, code) -> None:
+    def setLang(self, code: str) -> None:
         self.meta["defaultLang"] = code
         sql = "update profiles set data = ? where name = ?"
         self.db.execute(sql, self._pickle(self.meta), "_global")
@@ -522,41 +568,24 @@ create table if not exists profiles
     # OpenGL
     ######################################################################
 
-    def _glPath(self) -> str:
+    def _gldriver_path(self) -> str:
         return os.path.join(self.base, "gldriver")
 
-    def glMode(self) -> str:
-        if isMac:
-            return "auto"
+    def video_driver(self) -> VideoDriver:
+        path = self._gldriver_path()
+        try:
+            with open(path) as file:
+                text = file.read().strip()
+                return VideoDriver(text).constrained_to_platform()
+        except (ValueError, OSError):
+            return VideoDriver.default_for_platform()
 
-        path = self._glPath()
-        if not os.path.exists(path):
-            return "software"
+    def set_video_driver(self, driver: VideoDriver) -> None:
+        with open(self._gldriver_path(), "w") as file:
+            file.write(driver.value)
 
-        with open(path, "r") as file:
-            mode = file.read().strip()
-
-        if mode == "angle" and isWin:
-            return mode
-        elif mode == "software":
-            return mode
-        return "auto"
-
-    def setGlMode(self, mode) -> None:
-        with open(self._glPath(), "w") as file:
-            file.write(mode)
-
-    def nextGlMode(self) -> None:
-        mode = self.glMode()
-        if mode == "software":
-            self.setGlMode("auto")
-        elif mode == "auto":
-            if isWin:
-                self.setGlMode("angle")
-            else:
-                self.setGlMode("software")
-        elif mode == "angle":
-            self.setGlMode("software")
+    def set_next_video_driver(self) -> None:
+        self.set_video_driver(self.video_driver().next())
 
     # Shared options
     ######################################################################
@@ -571,7 +600,7 @@ create table if not exists profiles
     def last_addon_update_check(self) -> int:
         return self.meta.get("last_addon_update_check", 0)
 
-    def set_last_addon_update_check(self, secs) -> None:
+    def set_last_addon_update_check(self, secs: int) -> None:
         self.meta["last_addon_update_check"] = secs
 
     def night_mode(self) -> bool:
@@ -585,13 +614,6 @@ create table if not exists profiles
 
     # Profile-specific
     ######################################################################
-
-    def interrupt_audio(self) -> bool:
-        return self.profile.get("interrupt_audio", True)
-
-    def set_interrupt_audio(self, val: bool) -> None:
-        self.profile["interrupt_audio"] = val
-        aqt.sound.av_player.interrupt_current_audio = val
 
     def set_sync_key(self, val: Optional[str]) -> None:
         self.profile["syncKey"] = val
@@ -625,7 +647,14 @@ create table if not exists profiles
     def set_auto_sync_media_minutes(self, val: int) -> None:
         self.profile["autoSyncMediaMinutes"] = val
 
-    ######################################################################
+    def recording_driver(self) -> RecordingDriver:
+        if driver := self.profile.get("recordingDriver"):
+            try:
+                return RecordingDriver(driver)
+            except ValueError:
+                # revert to default
+                pass
+        return RecordingDriver.QtAudioInput
 
-    def apply_profile_options(self) -> None:
-        aqt.sound.av_player.interrupt_current_audio = self.interrupt_audio()
+    def set_recording_driver(self, driver: RecordingDriver) -> None:
+        self.profile["recordingDriver"] = driver.value

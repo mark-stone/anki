@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import anki
 from anki.consts import *
-from anki.rsbackend import TR, FormatTimeSpanContext
+from anki.lang import TR, FormatTimeSpan
 from anki.utils import ids2str
 
 # Card stats
@@ -46,7 +46,7 @@ class CardStats:
         return time.strftime("%Y-%m-%d", time.localtime(tm))
 
     def time(self, tm: float) -> str:
-        return self.col.format_timespan(tm, context=FormatTimeSpanContext.PRECISE)
+        return self.col.format_timespan(tm, context=FormatTimeSpan.PRECISE)
 
 
 # Collection stats
@@ -140,11 +140,11 @@ from revlog where id > ? """
         relrn = relrn or 0
         filt = filt or 0
         # studied
-        def bold(s):
+        def bold(s: str) -> str:
             return "<b>" + str(s) + "</b>"
 
         if cards:
-            b += self.col.backend.studied_today_message(
+            b += self.col._backend.studied_today_message(
                 cards=cards, seconds=float(thetime)
             )
             # again/pass count
@@ -298,7 +298,7 @@ group by day order by day"""
             # pylint: disable=invalid-unary-operand-type
             conf["xaxis"]["min"] = -days + 0.5
 
-        def plot(id, data, ylabel, ylabel2):
+        def plot(id: str, data: Any, ylabel: str, ylabel2: str) -> str:
             return self._graph(
                 id, data=data, conf=conf, xunit=chunk, ylabel=ylabel, ylabel2=ylabel2
             )
@@ -333,7 +333,7 @@ group by day order by day"""
             # pylint: disable=invalid-unary-operand-type
             conf["xaxis"]["min"] = -days + 0.5
 
-        def plot(id, data, ylabel, ylabel2):
+        def plot(id: str, data: Any, ylabel: str, ylabel2: str) -> str:
             return self._graph(
                 id, data=data, conf=conf, xunit=chunk, ylabel=ylabel, ylabel2=ylabel2
             )

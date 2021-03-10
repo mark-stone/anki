@@ -1,16 +1,15 @@
 # Copyright: Ankitects Pty Ltd and contributors
-# -*- coding: utf-8 -*-
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 import dataclasses
 import json
 import re
 import sys
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple, cast
 
 import anki
 from anki.lang import is_rtl
 from anki.utils import isLin, isMac, isWin
-from aqt import gui_hooks
+from aqt import colors, gui_hooks
 from aqt.qt import *
 from aqt.theme import theme_manager
 from aqt.utils import TR, openLink, showInfo, tr
@@ -20,9 +19,11 @@ serverbaseurl = re.compile(r"^.+:\/\/[^\/]+")
 # Page for debug messages
 ##########################################################################
 
+BridgeCommandHandler = Callable[[str], Any]
+
 
 class AnkiWebPage(QWebEnginePage):
-    def __init__(self, onBridgeCmd):
+    def __init__(self, onBridgeCmd: BridgeCommandHandler) -> None:
         QWebEnginePage.__init__(self)
         self._onBridgeCmd = onBridgeCmd
         self._setupBridge()
@@ -31,7 +32,7 @@ class AnkiWebPage(QWebEnginePage):
     def _setupBridge(self) -> None:
         class Bridge(QObject):
             @pyqtSlot(str, result=str)  # type: ignore
-            def cmd(self, str):
+            def cmd(self, str: str) -> Any:
                 return json.dumps(self.onCmd(str))
 
         self._bridge = Bridge()
@@ -74,7 +75,13 @@ class AnkiWebPage(QWebEnginePage):
         script.setRunsOnSubFrames(False)
         self.profile().scripts().insert(script)
 
-    def javaScriptConsoleMessage(self, level, msg, line, srcID):
+    def javaScriptConsoleMessage(
+        self,
+        level: QWebEnginePage.JavaScriptConsoleMessageLevel,
+        msg: str,
+        line: int,
+        srcID: str,
+    ) -> None:
         # not translated because console usually not visible,
         # and may only accept ascii text
         if srcID.startswith("data"):
@@ -82,13 +89,15 @@ class AnkiWebPage(QWebEnginePage):
         else:
             srcID = serverbaseurl.sub("", srcID[:80], 1)
         if level == QWebEnginePage.InfoMessageLevel:
-            level = "info"
+            level_str = "info"
         elif level == QWebEnginePage.WarningMessageLevel:
-            level = "warning"
+            level_str = "warning"
         elif level == QWebEnginePage.ErrorMessageLevel:
-            level = "error"
+            level_str = "error"
+        else:
+            level_str = str(level)
         buf = "JS %(t)s %(f)s:%(a)d %(b)s" % dict(
-            t=level, a=line, f=srcID, b=msg + "\n"
+            t=level_str, a=line, f=srcID, b=f"{msg}\n"
         )
         if "MathJax localStorage" in buf:
             # silence localStorage noise
@@ -101,8 +110,10 @@ class AnkiWebPage(QWebEnginePage):
         # https://github.com/ankitects/anki/pull/560
         sys.stdout.write(buf)
 
-    def acceptNavigationRequest(self, url, navType, isMainFrame):
-        if not self.open_links_externally:
+    def acceptNavigationRequest(
+        self, url: QUrl, navType: Any, isMainFrame: bool
+    ) -> bool:
+        if not self.open_links_externally or "_anki/pages" in url.path():
             return super().acceptNavigationRequest(url, navType, isMainFrame)
 
         if not isMainFrame:
@@ -113,17 +124,17 @@ class AnkiWebPage(QWebEnginePage):
         # catch buggy <a href='#' onclick='func()'> links
         from aqt import mw
 
-        if url.matches(QUrl(mw.serverURL()), QUrl.RemoveFragment):
+        if url.matches(QUrl(mw.serverURL()), cast(Any, QUrl.RemoveFragment)):
             print("onclick handler needs to return false")
             return False
         # load all other links in browser
         openLink(url)
         return False
 
-    def _onCmd(self, str):
+    def _onCmd(self, str: str) -> None:
         return self._onBridgeCmd(str)
 
-    def javaScriptAlert(self, url: QUrl, text: str):
+    def javaScriptAlert(self, url: QUrl, text: str) -> None:
         showInfo(text)
 
 
@@ -150,7 +161,7 @@ class WebContent:
         You should avoid overwriting or interfering with existing data as much
         as possible, instead opting to append your own changes, e.g.:
 
-            def on_webview_will_set_content(web_content: WebContent, context):
+            def on_webview_will_set_content(web_content: WebContent, context) -> None:
                 web_content.body += "<my_html>"
                 web_content.head += "<my_head>"
 
@@ -173,7 +184,7 @@ class WebContent:
           Then append the subpaths to the corresponding web_content fields
           within a function subscribing to gui_hooks.webview_will_set_content:
 
-              def on_webview_will_set_content(web_content: WebContent, context):
+              def on_webview_will_set_content(web_content: WebContent, context) -> None:
                   addon_package = mw.addonManager.addonFromModule(__name__)
                   web_content.css.append(
                       f"/_addons/{addon_package}/web/my-addon.css")
@@ -251,7 +262,7 @@ class AnkiWebView(QWebEngineView):
     def set_open_links_externally(self, enable: bool) -> None:
         self._page.open_links_externally = enable
 
-    def onEsc(self):
+    def onEsc(self) -> None:
         w = self.parent()
         while w:
             if isinstance(w, QDialog) or isinstance(w, QMainWindow):
@@ -266,7 +277,7 @@ class AnkiWebView(QWebEngineView):
                 break
             w = w.parent()
 
-    def onCopy(self):
+    def onCopy(self) -> None:
         if not self.selectedText():
             ctx = self._page.contextMenuData()
             if ctx and ctx.mediaType() == QWebEngineContextMenuData.MediaTypeImage:
@@ -274,16 +285,16 @@ class AnkiWebView(QWebEngineView):
         else:
             self.triggerPageAction(QWebEnginePage.Copy)
 
-    def onCut(self):
+    def onCut(self) -> None:
         self.triggerPageAction(QWebEnginePage.Cut)
 
-    def onPaste(self):
+    def onPaste(self) -> None:
         self.triggerPageAction(QWebEnginePage.Paste)
 
-    def onMiddleClickPaste(self):
+    def onMiddleClickPaste(self) -> None:
         self.triggerPageAction(QWebEnginePage.Paste)
 
-    def onSelectAll(self):
+    def onSelectAll(self) -> None:
         self.triggerPageAction(QWebEnginePage.SelectAll)
 
     def contextMenuEvent(self, evt: QContextMenuEvent) -> None:
@@ -293,7 +304,7 @@ class AnkiWebView(QWebEngineView):
         gui_hooks.webview_will_show_context_menu(self, m)
         m.popup(QCursor.pos())
 
-    def dropEvent(self, evt):
+    def dropEvent(self, evt: QDropEvent) -> None:
         pass
 
     def setHtml(self, html: str) -> None:  #  type: ignore
@@ -312,7 +323,7 @@ class AnkiWebView(QWebEngineView):
         if oldFocus:
             oldFocus.setFocus()
 
-    def load(self, url: QUrl):
+    def load(self, url: QUrl) -> None:
         # allow queuing actions when loading url directly
         self._domDone = False
         super().load(url)
@@ -348,7 +359,7 @@ class AnkiWebView(QWebEngineView):
             QWebEngineSettings.PlaybackRequiresUserGesture, value
         )
 
-    def _getQtIntScale(self, screen) -> int:
+    def _getQtIntScale(self, screen: QWidget) -> int:
         # try to detect if Qt has scaled the screen
         # - qt will round the scale factor to a whole number, so a dpi of 125% = 1x,
         #   and a dpi of 150% = 2x
@@ -364,9 +375,9 @@ class AnkiWebView(QWebEngineView):
         else:
             return 3
 
-    def _getWindowColor(self):
+    def _getWindowColor(self) -> QColor:
         if theme_manager.night_mode:
-            return theme_manager.qcolor("window-bg")
+            return theme_manager.qcolor(colors.WINDOW_BG)
         if isMac:
             # standard palette does not return correct window color on macOS
             return QColor("#ececec")
@@ -381,10 +392,10 @@ class AnkiWebView(QWebEngineView):
             family = tr(TR.QT_MISC_SEGOE_UI)
             button_style = "button { font-family:%s; }" % family
             button_style += "\n:focus { outline: 1px solid %s; }" % color_hl
-            font = "font-size:12px;font-family:%s;" % family
+            font = f"font-size:12px;font-family:{family};"
         elif isMac:
             family = "Helvetica"
-            font = 'font-size:15px;font-family:"%s";' % family
+            font = f'font-size:15px;font-family:"{family}";'
             button_style = """
 button { -webkit-appearance: none; background: #fff; border: 1px solid #ccc;
 border-radius:5px; font-family: Helvetica }"""
@@ -392,7 +403,7 @@ border-radius:5px; font-family: Helvetica }"""
             family = self.font().family()
             color_hl_txt = palette.color(QPalette.HighlightedText).name()
             color_btn = palette.color(QPalette.Button).name()
-            font = 'font-size:14px;font-family:"%s";' % family
+            font = f'font-size:14px;font-family:"{family}";'
             button_style = """
 /* Buttons */
 button{ 
@@ -434,12 +445,12 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
         js: Optional[List[str]] = None,
         head: str = "",
         context: Optional[Any] = None,
-    ):
+    ) -> None:
 
         web_content = WebContent(
             body=body,
             head=head,
-            js=["js/webview.js"] + (["js/vendor/jquery.js"] if js is None else js),
+            js=["js/webview.js"] + (["js/vendor/jquery.min.js"] if js is None else js),
             css=["css/webview.css"] + ([] if css is None else css),
         )
 
@@ -492,7 +503,7 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
         return f"http://127.0.0.1:{mw.mediaServer.getPort()}{subpath}{path}"
 
     def bundledScript(self, fname: str) -> str:
-        return '<script src="%s"></script>' % self.webBundlePath(fname)
+        return f'<script src="{self.webBundlePath(fname)}"></script>'
 
     def bundledCSS(self, fname: str) -> str:
         return '<link rel="stylesheet" type="text/css" href="%s">' % self.webBundlePath(
@@ -508,7 +519,7 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
     def _evalWithCallback(self, js: str, cb: Callable[[Any], Any]) -> None:
         if cb:
 
-            def handler(val):
+            def handler(val: Any) -> None:
                 if self._shouldIgnoreWebEvent():
                     print("ignored late js callback", cb)
                     return
@@ -531,7 +542,7 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
             elif name == "setHtml":
                 self._setHtml(*args)
             else:
-                raise Exception("unknown action: {}".format(name))
+                raise Exception(f"unknown action: {name}")
 
     def _openLinksExternally(self, url: str) -> None:
         openLink(url)
@@ -597,18 +608,18 @@ body {{ zoom: {zoom}; background: {background}; direction: {lang_dir}; {font} }}
         self.onBridgeCmd = func
         self._bridge_context = context
 
-    def hide_while_preserving_layout(self):
+    def hide_while_preserving_layout(self) -> None:
         "Hide but keep existing size."
         sp = self.sizePolicy()
         sp.setRetainSizeWhenHidden(True)
         self.setSizePolicy(sp)
         self.hide()
 
-    def inject_dynamic_style_and_show(self):
+    def inject_dynamic_style_and_show(self) -> None:
         "Add dynamic styling, and reveal."
         css = self.standard_css()
 
-        def after_style(arg):
+        def after_style(arg: Any) -> None:
             gui_hooks.webview_did_inject_style_into_page(self)
             self.show()
 
@@ -624,11 +635,11 @@ document.head.appendChild(style);
     def load_ts_page(self, name: str) -> None:
         from aqt import mw
 
-        self.set_open_links_externally(False)
+        self.set_open_links_externally(True)
         if theme_manager.night_mode:
             extra = "#night"
         else:
             extra = ""
         self.hide_while_preserving_layout()
-        self.load(QUrl(f"{mw.serverURL()}_anki/pages/{name}.html" + extra))
+        self.load(QUrl(f"{mw.serverURL()}_anki/pages/{name}.html{extra}"))
         self.inject_dynamic_style_and_show()

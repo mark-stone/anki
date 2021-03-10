@@ -5,17 +5,18 @@ use crate::{
     collection::Collection,
     define_newtype,
     err::{AnkiError, Result},
+    scheduler::states::review::INITIAL_EASE_FACTOR,
     timestamp::{TimestampMillis, TimestampSecs},
     types::Usn,
 };
 
 pub use crate::backend_proto::{
-    deck_config_inner::{LeechAction, NewCardOrder},
+    deck_config_inner::{LeechAction, NewCardOrder, ReviewCardOrder, ReviewMix},
     DeckConfigInner,
 };
 pub use schema11::{DeckConfSchema11, NewCardOrderSchema11};
 /// Old deck config and cards table store 250% as 2500.
-pub const INITIAL_EASE_FACTOR_THOUSANDS: u16 = 2500;
+pub(crate) const INITIAL_EASE_FACTOR_THOUSANDS: u16 = (INITIAL_EASE_FACTOR * 1000.0) as u16;
 
 mod schema11;
 
@@ -40,26 +41,30 @@ impl Default for DeckConf {
             inner: DeckConfigInner {
                 learn_steps: vec![1.0, 10.0],
                 relearn_steps: vec![10.0],
-                disable_autoplay: false,
-                cap_answer_time_to_secs: 60,
-                visible_timer_secs: 0,
-                skip_question_when_replaying_answer: false,
                 new_per_day: 20,
                 reviews_per_day: 200,
-                bury_new: false,
-                bury_reviews: false,
+                new_per_day_minimum: 0,
                 initial_ease: 2.5,
                 easy_multiplier: 1.3,
                 hard_multiplier: 1.2,
                 lapse_multiplier: 0.0,
                 interval_multiplier: 1.0,
                 maximum_review_interval: 36_500,
-                minimum_review_interval: 1,
+                minimum_lapse_interval: 1,
                 graduating_interval_good: 1,
                 graduating_interval_easy: 4,
                 new_card_order: NewCardOrder::Due as i32,
+                review_order: ReviewCardOrder::ShuffledByDay as i32,
+                new_mix: ReviewMix::MixWithReviews as i32,
+                interday_learning_mix: ReviewMix::MixWithReviews as i32,
                 leech_action: LeechAction::TagOnly as i32,
                 leech_threshold: 8,
+                disable_autoplay: false,
+                cap_answer_time_to_secs: 60,
+                visible_timer_secs: 0,
+                skip_question_when_replaying_answer: false,
+                bury_new: false,
+                bury_reviews: false,
                 other: vec![],
             },
         }

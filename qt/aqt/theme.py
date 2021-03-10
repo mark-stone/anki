@@ -1,14 +1,32 @@
-# -*- coding: utf-8 -*-
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+from __future__ import annotations
+
 import platform
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple, Union
 
 from anki.utils import isMac
-from aqt import QApplication, gui_hooks, isWin
-from aqt.colors import colors
-from aqt.qt import QColor, QIcon, QPalette, QPixmap, QStyleFactory, Qt
+from aqt import QApplication, colors, gui_hooks, isWin
+from aqt.platform import set_dark_mode
+from aqt.qt import QColor, QIcon, QPainter, QPalette, QPixmap, QStyleFactory, Qt
+
+
+@dataclass
+class ColoredIcon:
+    path: str
+    # (day, night)
+    color: Tuple[str, str]
+
+    def current_color(self, night_mode: bool) -> str:
+        if night_mode:
+            return self.color[1]
+        else:
+            return self.color[0]
+
+    def with_color(self, color: Tuple[str, str]) -> ColoredIcon:
+        return ColoredIcon(path=self.path, color=color)
 
 
 class ThemeManager:
@@ -16,15 +34,22 @@ class ThemeManager:
     _icon_cache_light: Dict[str, QIcon] = {}
     _icon_cache_dark: Dict[str, QIcon] = {}
     _icon_size = 128
+    _dark_mode_available: Optional[bool] = None
 
     def macos_dark_mode(self) -> bool:
         "True if the user has night mode on, and has forced native widgets."
         if not isMac:
             return False
 
+        if not self._night_mode_preference:
+            return False
+
+        if self._dark_mode_available is None:
+            self._dark_mode_available = set_dark_mode(True)
+
         from aqt import mw
 
-        return self._night_mode_preference and mw.pm.dark_mode_widgets()
+        return self._dark_mode_available and mw.pm.dark_mode_widgets()
 
     def get_night_mode(self) -> bool:
         return self._night_mode_preference
@@ -35,22 +60,39 @@ class ThemeManager:
 
     night_mode = property(get_night_mode, set_night_mode)
 
-    def icon_from_resources(self, path: str) -> QIcon:
+    def icon_from_resources(self, path: Union[str, ColoredIcon]) -> QIcon:
         "Fetch icon from Qt resources, and invert if in night mode."
         if self.night_mode:
             cache = self._icon_cache_light
         else:
             cache = self._icon_cache_dark
-        icon = cache.get(path)
+
+        if isinstance(path, str):
+            key = path
+        else:
+            key = f"{path.path}-{path.color}"
+
+        icon = cache.get(key)
         if icon:
             return icon
 
-        icon = QIcon(path)
-
-        if self.night_mode:
-            img = icon.pixmap(self._icon_size, self._icon_size).toImage()
-            img.invertPixels()
-            icon = QIcon(QPixmap(img))
+        if isinstance(path, str):
+            # default black/white
+            icon = QIcon(path)
+            if self.night_mode:
+                img = icon.pixmap(self._icon_size, self._icon_size).toImage()
+                img.invertPixels()
+                icon = QIcon(QPixmap(img))
+        else:
+            # specified colours
+            icon = QIcon(path.path)
+            img = icon.pixmap(16)
+            painter = QPainter(img)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(img.rect(), QColor(path.current_color(self.night_mode)))
+            painter.end()
+            icon = QIcon(img)
+            return icon
 
         return cache.setdefault(path, icon)
 
@@ -78,22 +120,13 @@ class ThemeManager:
         "Returns body classes used when showing a card."
         return f"card card{card_ord+1} {self.body_class(night_mode)}"
 
-    def str_color(self, key: str) -> str:
-        """Get a color defined in _vars.scss
-
-        If the colour is called '--frame-bg', key should be
-        'frame-bg'.
-
-        Returns the color as a string hex code or color name."""
+    def color(self, colors: Tuple[str, str]) -> str:
+        """Given day/night colors, return the correct one for the current theme."""
         idx = 1 if self.night_mode else 0
-        c = colors.get(key)
-        if c is None:
-            raise Exception("no such color:", key)
-        return c[idx]
+        return colors[idx]
 
-    def qcolor(self, key: str) -> QColor:
-        """Get a color defined in _vars.scss as a QColor."""
-        return QColor(self.str_color(key))
+    def qcolor(self, colors: Tuple[str, str]) -> QColor:
+        return QColor(self.color(colors))
 
     def apply_style(self, app: QApplication) -> None:
         self._apply_palette(app)
@@ -148,10 +181,10 @@ QScrollBar::sub-line {
 
 QTabWidget { background-color: %s; }
 """ % (
-                    self.str_color("window-bg"),
+                    self.color(colors.WINDOW_BG),
                     # fushion-button-hover-bg
                     "#656565",
-                    self.str_color("window-bg"),
+                    self.color(colors.WINDOW_BG),
                 )
 
         # allow addons to modify the styling
@@ -168,33 +201,33 @@ QTabWidget { background-color: %s; }
 
         palette = QPalette()
 
-        text_fg = self.qcolor("text-fg")
+        text_fg = self.qcolor(colors.TEXT_FG)
         palette.setColor(QPalette.WindowText, text_fg)
         palette.setColor(QPalette.ToolTipText, text_fg)
         palette.setColor(QPalette.Text, text_fg)
         palette.setColor(QPalette.ButtonText, text_fg)
 
-        hlbg = self.qcolor("highlight-bg")
+        hlbg = self.qcolor(colors.HIGHLIGHT_BG)
         hlbg.setAlpha(64)
-        palette.setColor(QPalette.HighlightedText, self.qcolor("highlight-fg"))
+        palette.setColor(QPalette.HighlightedText, self.qcolor(colors.HIGHLIGHT_FG))
         palette.setColor(QPalette.Highlight, hlbg)
 
-        window_bg = self.qcolor("window-bg")
+        window_bg = self.qcolor(colors.WINDOW_BG)
         palette.setColor(QPalette.Window, window_bg)
         palette.setColor(QPalette.AlternateBase, window_bg)
 
         palette.setColor(QPalette.Button, QColor("#454545"))
 
-        frame_bg = self.qcolor("frame-bg")
+        frame_bg = self.qcolor(colors.FRAME_BG)
         palette.setColor(QPalette.Base, frame_bg)
         palette.setColor(QPalette.ToolTipBase, frame_bg)
 
-        disabled_color = self.qcolor("disabled")
+        disabled_color = self.qcolor(colors.DISABLED)
         palette.setColor(QPalette.Disabled, QPalette.Text, disabled_color)
         palette.setColor(QPalette.Disabled, QPalette.ButtonText, disabled_color)
         palette.setColor(QPalette.Disabled, QPalette.HighlightedText, disabled_color)
 
-        palette.setColor(QPalette.Link, self.qcolor("link"))
+        palette.setColor(QPalette.Link, self.qcolor(colors.LINK))
 
         palette.setColor(QPalette.BrightText, Qt.red)
 
@@ -203,11 +236,11 @@ QTabWidget { background-color: %s; }
     def _update_stat_colors(self) -> None:
         import anki.stats as s
 
-        s.colLearn = self.str_color("new-count")
-        s.colRelearn = self.str_color("learn-count")
-        s.colCram = self.str_color("suspended-bg")
-        s.colSusp = self.str_color("suspended-bg")
-        s.colMature = self.str_color("review-count")
+        s.colLearn = self.color(colors.NEW_COUNT)
+        s.colRelearn = self.color(colors.LEARN_COUNT)
+        s.colCram = self.color(colors.SUSPENDED_BG)
+        s.colSusp = self.color(colors.SUSPENDED_BG)
+        s.colMature = self.color(colors.REVIEW_COUNT)
 
 
 theme_manager = ThemeManager()

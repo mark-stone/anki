@@ -19,8 +19,9 @@ $ brew install rsync bazelisk
 
 **Install Python 3.8**:
 
-Install Python 3.8 from <https://python.org>. You may be able to use
-the Homebrew version instead, but this is untested.
+Install Python 3.8 from <https://python.org>. We have heard reports
+of issues with pyenv and homebrew, so the package from python.org is
+the only recommended approach.
 
 Python 3.9 is not currently recommended, as pylint does not support it yet.
 
@@ -50,8 +51,18 @@ This will build Anki and run it in place.
 The first build will take a while, as it downloads and builds a bunch of
 dependencies. When the build is complete, Anki will automatically start.
 
-To play audio, use Homebrew to install mpv. At the time of writing, recording is
-not yet supported, as currently pyaudio is not being installed.
+To play audio, use Homebrew to install mpv and lame.
+
+## Optimized builds
+
+The `./run` command will create a non-optimized build by default. This is faster
+to compile, but will mean Anki will run considerably slower.
+
+To run Anki in optimized mode, use:
+
+```
+./scripts/runopt
+```
 
 ## More
 

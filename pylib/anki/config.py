@@ -21,9 +21,11 @@ from __future__ import annotations
 import copy
 import weakref
 from typing import Any
+from weakref import ref
 
 import anki
-from anki.rsbackend import NotFoundError, from_json_bytes, to_json_bytes
+from anki.errors import NotFoundError
+from anki.utils import from_json_bytes, to_json_bytes
 
 
 class ConfigManager:
@@ -32,20 +34,20 @@ class ConfigManager:
 
     def get_immutable(self, key: str) -> Any:
         try:
-            return from_json_bytes(self.col.backend.get_config_json(key))
+            return from_json_bytes(self.col._backend.get_config_json(key))
         except NotFoundError as exc:
             raise KeyError from exc
 
     def set(self, key: str, val: Any) -> None:
-        self.col.backend.set_config_json(key=key, value_json=to_json_bytes(val))
+        self.col._backend.set_config_json(key=key, value_json=to_json_bytes(val))
 
     def remove(self, key: str) -> None:
-        self.col.backend.remove_config(key)
+        self.col._backend.remove_config(key)
 
     # Legacy dict interface
     #########################
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> Any:
         val = self.get_immutable(key)
         if isinstance(val, list):
             print(
@@ -60,28 +62,28 @@ class ConfigManager:
         else:
             return val
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: str, value: Any) -> None:
         self.set(key, value)
 
-    def get(self, key, default=None):
+    def get(self, key: str, default: Any = None) -> Any:
         try:
             return self[key]
         except KeyError:
             return default
 
-    def setdefault(self, key, default):
+    def setdefault(self, key: str, default: Any) -> Any:
         if key not in self:
             self[key] = default
         return self[key]
 
-    def __contains__(self, key):
+    def __contains__(self, key: str) -> bool:
         try:
             self.get_immutable(key)
             return True
         except KeyError:
             return False
 
-    def __delitem__(self, key):
+    def __delitem__(self, key: str) -> None:
         self.remove(key)
 
 
@@ -94,13 +96,13 @@ class ConfigManager:
 
 
 class WrappedList(list):
-    def __init__(self, conf, key, val):
+    def __init__(self, conf: ref[ConfigManager], key: str, val: Any) -> None:
         self.key = key
         self.conf = conf
         self.orig = copy.deepcopy(val)
         super().__init__(val)
 
-    def __del__(self):
+    def __del__(self) -> None:
         cur = list(self)
         conf = self.conf()
         if conf and self.orig != cur:
@@ -108,13 +110,13 @@ class WrappedList(list):
 
 
 class WrappedDict(dict):
-    def __init__(self, conf, key, val):
+    def __init__(self, conf: ref[ConfigManager], key: str, val: Any) -> None:
         self.key = key
         self.conf = conf
         self.orig = copy.deepcopy(val)
         super().__init__(val)
 
-    def __del__(self):
+    def __del__(self) -> None:
         cur = dict(self)
         conf = self.conf()
         if conf and self.orig != cur:

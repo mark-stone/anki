@@ -2,22 +2,27 @@
     import type { I18n } from "anki/i18n";
     import type { HistogramData } from "./histogram-graph";
     import { GraphRange, RevlogRange } from "./graph-helpers";
-    import type { TableDatum } from "./graph-helpers";
+    import type { TableDatum, SearchEventMap } from "./graph-helpers";
     import { gatherData, buildHistogram } from "./future-due";
     import type { GraphData } from "./future-due";
     import type pb from "anki/backend_proto";
     import HistogramGraph from "./HistogramGraph.svelte";
     import GraphRangeRadios from "./GraphRangeRadios.svelte";
     import TableData from "./TableData.svelte";
+    import { createEventDispatcher } from "svelte";
+    import type { PreferenceStore } from "./preferences";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
     export let i18n: I18n;
+    export let preferences: PreferenceStore;
+
+    const dispatch = createEventDispatcher<SearchEventMap>();
 
     let graphData = null as GraphData | null;
     let histogramData = null as HistogramData | null;
     let tableData: TableDatum[] = [] as any;
-    let backlog: boolean = true;
     let graphRange: GraphRange = GraphRange.Month;
+    let { browserLinksSupported, futureDueShowBacklog } = preferences;
 
     $: if (sourceData) {
         graphData = gatherData(sourceData);
@@ -27,8 +32,10 @@
         ({ histogramData, tableData } = buildHistogram(
             graphData,
             graphRange,
-            backlog,
-            i18n
+            $futureDueShowBacklog,
+            i18n,
+            dispatch,
+            $browserLinksSupported
         ));
     }
 
@@ -45,7 +52,7 @@
     <div class="range-box-inner">
         {#if graphData && graphData.haveBacklog}
             <label>
-                <input type="checkbox" bind:checked={backlog} />
+                <input type="checkbox" bind:checked={$futureDueShowBacklog} />
                 {backlogLabel}
             </label>
         {/if}

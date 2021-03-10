@@ -7,7 +7,8 @@
 @typescript-eslint/ban-ts-ignore: "off" */
 
 import pb from "anki/backend_proto";
-import type { Selection } from "d3-selection";
+import type { Selection } from "d3";
+import type { PreferencePayload } from "./preferences";
 import { postRequest } from "anki/postrequest";
 
 export async function getGraphData(
@@ -19,10 +20,29 @@ export async function getGraphData(
     );
 }
 
+export async function getGraphPreferences(): Promise<pb.BackendProto.GraphPreferences> {
+    return pb.BackendProto.GraphPreferences.decode(
+        await postRequest("/_anki/graphPreferences", JSON.stringify({}))
+    );
+}
+
+export async function setGraphPreferences(prefs: PreferencePayload): Promise<void> {
+    return (async (): Promise<void> => {
+        await postRequest(
+            "/_anki/setGraphPreferences",
+            pb.BackendProto.GraphPreferences.encode(prefs).finish()
+        );
+    })();
+}
+
 // amount of data to fetch from backend
 export enum RevlogRange {
     Year = 1,
     All = 2,
+}
+
+export function daysToRevlogRange(days: number): RevlogRange {
+    return days > 365 || days === 0 ? RevlogRange.All : RevlogRange.Year;
 }
 
 // period a graph should cover
@@ -98,3 +118,9 @@ export interface TableDatum {
     label: string;
     value: string;
 }
+
+export type SearchEventMap = { search: { query: string } };
+export type SearchDispatch = <EventKey extends Extract<keyof SearchEventMap, string>>(
+    type: EventKey,
+    detail: SearchEventMap[EventKey]
+) => void;

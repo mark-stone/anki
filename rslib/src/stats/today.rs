@@ -1,7 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{i18n::I18n, prelude::*, sched::timespan::Timespan};
+use crate::{i18n::I18n, prelude::*, scheduler::timespan::Timespan};
 
 pub fn studied_today(cards: u32, secs: f32, i18n: &I18n) -> String {
     let span = Timespan::from_secs(secs).natural_span();
@@ -18,10 +18,9 @@ pub fn studied_today(cards: u32, secs: f32, i18n: &I18n) -> String {
 }
 
 impl Collection {
-    pub fn studied_today(&self) -> Result<String> {
-        let today = self
-            .storage
-            .studied_today(self.timing_today()?.next_day_at)?;
+    pub fn studied_today(&mut self) -> Result<String> {
+        let timing = self.timing_today()?;
+        let today = self.storage.studied_today(timing.next_day_at)?;
         Ok(studied_today(today.cards, today.seconds as f32, &self.i18n))
     }
 }

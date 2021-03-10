@@ -7,7 +7,7 @@ from typing import Any, List, Optional, TextIO, Union
 
 from anki.collection import Collection
 from anki.importing.noteimp import ForeignNote, NoteImporter
-from anki.rsbackend import TR
+from anki.lang import TR
 
 
 class TextImporter(NoteImporter):
@@ -71,14 +71,14 @@ class TextImporter(NoteImporter):
 
     def openFile(self) -> None:
         self.dialect = None
-        self.fileobj = open(self.file, "r", encoding="utf-8-sig")
+        self.fileobj = open(self.file, encoding="utf-8-sig")
         self.data = self.fileobj.read()
 
         def sub(s):
             return re.sub(r"^\#.*$", "__comment", s)
 
         self.data = [
-            sub(x) + "\n" for x in self.data.split("\n") if sub(x) != "__comment"
+            f"{sub(x)}\n" for x in self.data.split("\n") if sub(x) != "__comment"
         ]
         if self.data:
             if self.data[0].startswith("tags:"):

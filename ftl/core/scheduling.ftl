@@ -90,6 +90,17 @@ scheduling-how-to-custom-study = If you wish to study outside of the regular sch
 # used in scheduling-how-to-custom-study
 # "... you can use the custom study feature."
 scheduling-custom-study = custom study
+
+## Scheduler upgrade
+
+scheduling-update-soon = Anki 2.1 comes with a new scheduler, which fixes a number of issues that previous Anki versions had. Updating to it is recommended.
+scheduling-update-done = Scheduler updated successfully.
+scheduling-update-button = Update
+scheduling-update-later-button = Later
+scheduling-update-more-info-button = Learn More
+
+## Other scheduling strings
+
 scheduling-always-include-question-side-when-replaying = Always include question side when replaying audio
 scheduling-at-least-one-step-is-required = At least one step is required.
 scheduling-automatically-play-audio = Automatically play audio
@@ -142,4 +153,23 @@ scheduling-deck-updated =
     { $count ->
         [one] { $count } deck updated.
        *[other] { $count } decks updated.
+    }
+scheduling-set-due-date-prompt =
+    { $cards ->
+        [one] Show card in how many days?
+       *[other] Show cards in how many days?
+    }
+scheduling-set-due-date-prompt-hint =
+    0 = today
+    1! = tomorrow+reset review interval
+    3-7 = random choice of 3-7 days
+scheduling-set-due-date-done =
+    { $cards ->
+        [one] Set due date of { $cards } card.
+       *[other] Set due date of { $cards } cards.
+    }
+scheduling-forgot-cards =
+    { $cards ->
+        [one] Forgot { $cards } card.
+       *[other] Forgot { $cards } cards.
     }

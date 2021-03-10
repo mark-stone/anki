@@ -11,12 +11,12 @@ use std::convert::TryFrom;
 // Regular backend
 //////////////////////////////////
 
-#[pyclass(module = "_rsbridge")]
+#[pyclass(module = "rsbridge")]
 struct Backend {
     backend: RustBackend,
 }
 
-create_exception!(_rsbridge, BackendError, PyException);
+create_exception!(rsbridge, BackendError, PyException);
 
 #[pyfunction]
 fn buildhash() -> &'static str {
@@ -40,19 +40,21 @@ fn want_release_gil(method: u32) -> bool {
                 | BackendMethod::RenderExistingCard
                 | BackendMethod::RenderUncommittedCard
                 | BackendMethod::StripAVTags
-                | BackendMethod::LocalMinutesWest
                 | BackendMethod::SchedTimingToday
                 | BackendMethod::AddOrUpdateDeckLegacy
                 | BackendMethod::NewDeckLegacy
                 | BackendMethod::NewDeckConfigLegacy
                 | BackendMethod::GetStockNotetypeLegacy
-                | BackendMethod::SetLocalMinutesWest
                 | BackendMethod::StudiedToday
                 | BackendMethod::TranslateString
                 | BackendMethod::FormatTimespan
                 | BackendMethod::LatestProgress
                 | BackendMethod::SetWantsAbort
                 | BackendMethod::I18nResources
+                | BackendMethod::JoinSearchNodes
+                | BackendMethod::ReplaceSearchNode
+                | BackendMethod::BuildSearchString
+                | BackendMethod::StateIsLeech
         )
     } else {
         false
@@ -94,7 +96,7 @@ impl Backend {
 //////////////////////////////////
 
 #[pymodule]
-fn _rsbridge(_py: Python, m: &PyModule) -> PyResult<()> {
+fn rsbridge(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Backend>()?;
     m.add_wrapped(wrap_pyfunction!(buildhash)).unwrap();
     m.add_wrapped(wrap_pyfunction!(open_backend)).unwrap();

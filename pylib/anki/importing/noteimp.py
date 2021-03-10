@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from anki.collection import Collection
 from anki.consts import NEW_CARDS_RANDOM, STARTING_FACTOR
 from anki.importing.base import Importer
-from anki.rsbackend import TR
+from anki.lang import TR
 from anki.utils import (
     fieldChecksum,
     guid64,
@@ -229,7 +229,7 @@ class NoteImporter(Importer):
         else:
             unchanged = 0
         part3 = self.col.tr(TR.IMPORTING_NOTE_UNCHANGED, count=unchanged)
-        self.log.append("%s, %s, %s." % (part1, part2, part3))
+        self.log.append(f"{part1}, {part2}, {part3}.")
         self.log.extend(updateLog)
         self.total = len(self._ids)
 
@@ -250,7 +250,7 @@ class NoteImporter(Importer):
             self.col.tags.join(n.tags),
             n.fieldsStr,
             "",
-            "",
+            0,
             0,
             "",
         ]

@@ -9,6 +9,8 @@ import re
 import os
 import sys
 from typing import Optional, Tuple
+import requests
+from hashlib import sha256
 
 root = os.environ["BUILD_WORKSPACE_DIRECTORY"]
 repos_bzl = os.path.join(root, "repos.bzl")
@@ -64,18 +66,32 @@ def update_git_repos():
 @dataclass
 class GitInfo:
     sha1: str
-    shallow_since: str
+    zip_sha256: str
+
+
+def git_url_to_zip_url(repo: str, commit: str) -> str:
+    repo = repo.replace("git@github.com:", "https://github.com/")
+    return f"{repo}/archive/{commit}.zip"
+
+
+def get_zip_sha(zip_url: str) -> str:
+    resp = requests.get(zip_url)
+    resp.raise_for_status()
+    return sha256(resp.content).hexdigest()
 
 
 def module_git_info(module: Module) -> GitInfo:
     folder = module.folder()
-    sha = subprocess.check_output(
+    sha1 = subprocess.check_output(
         ["git", "log", "-n", "1", "--pretty=format:%H"], cwd=folder
+    ).decode("utf8")
+    zip_url = git_url_to_zip_url(module.repo, sha1)
+    zip_sha = get_zip_sha(zip_url)
+
+    return GitInfo(
+        sha1=sha1,
+        zip_sha256=zip_sha,
     )
-    shallow = subprocess.check_output(
-        ["git", "log", "-n", "1", "--pretty=format:%cd", "--date=raw"], cwd=folder
-    )
-    return GitInfo(sha1=sha.decode("utf8"), shallow_since=shallow.decode("utf8"))
 
 
 def update_repos_bzl():
@@ -85,12 +101,12 @@ def update_repos_bzl():
         git = module_git_info(module)
         prefix = f"{module.name}_i18n_"
         entries[prefix + "commit"] = git.sha1
-        entries[prefix + "shallow_since"] = git.shallow_since
+        entries[prefix + "zip_csum"] = git.zip_sha256
 
     # apply
     out = []
     path = repos_bzl
-    reg = re.compile(r'(\s+)(\S+_(?:commit|shallow_since)) = "(.*)"')
+    reg = re.compile(r'(\s+)(\S+_(?:commit|zip_csum)) = "(.*)"')
     for line in open(path).readlines():
         if m := reg.match(line):
             (indent, key, _oldvalue) = m.groups()
@@ -101,16 +117,16 @@ def update_repos_bzl():
             out.append(line)
     open(path, "w").writelines(out)
 
-    commit_if_changed(root)
+    commit_if_changed(root, update_label="translations")
 
 
-def commit_if_changed(folder: str):
+def commit_if_changed(folder: str, update_label: str):
     status = subprocess.run(["git", "diff", "--exit-code"], cwd=folder, check=False)
     if status.returncode == 0:
         # no changes
         return
     subprocess.run(
-        ["git", "commit", "-a", "-m", "update translations"], cwd=folder, check=True
+        ["git", "commit", "-a", "-m", "update " + update_label], cwd=folder, check=True
     )
 
 
@@ -131,7 +147,7 @@ def update_ftl_templates():
                 ],
                 check=True,
             )
-            commit_if_changed(module.folder())
+            commit_if_changed(module.folder(), update_label="templates")
 
 
 def push_i18n_changes():

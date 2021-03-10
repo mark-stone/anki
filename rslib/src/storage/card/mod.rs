@@ -7,7 +7,10 @@ use crate::{
     decks::{Deck, DeckID, DeckKind},
     err::Result,
     notes::NoteID,
-    sched::congrats::CongratsInfo,
+    scheduler::{
+        congrats::CongratsInfo,
+        queue::{DueCard, NewCard},
+    },
     timestamp::{TimestampMillis, TimestampSecs},
     types::Usn,
 };
@@ -125,7 +128,7 @@ impl super::SqliteStorage {
         Ok(())
     }
 
-    /// Add or update card, using the provided ID. Used when syncing.
+    /// Add or update card, using the provided ID. Used for syncing & undoing.
     pub(crate) fn add_or_update_card(&self, card: &Card) -> Result<()> {
         let mut stmt = self.db.prepare_cached(include_str!("add_or_update.sql"))?;
         stmt.execute(params![
@@ -156,6 +159,68 @@ impl super::SqliteStorage {
         self.db
             .prepare_cached("delete from cards where id = ?")?
             .execute(&[cid])?;
+        Ok(())
+    }
+
+    /// Call func() for each due card, stopping when it returns false
+    /// or no more cards found.
+    pub(crate) fn for_each_due_card_in_deck<F>(
+        &self,
+        day_cutoff: u32,
+        learn_cutoff: i64,
+        deck: DeckID,
+        mut func: F,
+    ) -> Result<()>
+    where
+        F: FnMut(CardQueue, DueCard) -> bool,
+    {
+        let mut stmt = self.db.prepare_cached(include_str!("due_cards.sql"))?;
+        let mut rows = stmt.query(params![
+            // with many subdecks, avoiding named params shaves off a few milliseconds
+            deck,
+            day_cutoff,
+            learn_cutoff
+        ])?;
+        while let Some(row) = rows.next()? {
+            let queue: CardQueue = row.get(0)?;
+            if !func(
+                queue,
+                DueCard {
+                    id: row.get(1)?,
+                    note_id: row.get(2)?,
+                    due: row.get(3).ok().unwrap_or_default(),
+                    interval: row.get(4)?,
+                    mtime: row.get(5)?,
+                    hash: 0,
+                },
+            ) {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Call func() for each new card, stopping when it returns false
+    /// or no more cards found. Cards will arrive in (deck_id, due) order.
+    pub(crate) fn for_each_new_card_in_deck<F>(&self, deck: DeckID, mut func: F) -> Result<()>
+    where
+        F: FnMut(NewCard) -> bool,
+    {
+        let mut stmt = self.db.prepare_cached(include_str!("new_cards.sql"))?;
+        let mut rows = stmt.query(params![deck])?;
+        while let Some(row) = rows.next()? {
+            if !func(NewCard {
+                id: row.get(0)?,
+                note_id: row.get(1)?,
+                due: row.get(2)?,
+                extra: row.get::<_, u32>(3)? as u64,
+                mtime: row.get(4)?,
+            }) {
+                break;
+            }
+        }
+
         Ok(())
     }
 
@@ -229,7 +294,7 @@ impl super::SqliteStorage {
             .prepare_cached("select null from cards")?
             .query(NO_PARAMS)?
             .next()
-            .map(|o| o.is_none())
+            .map(|o| o.is_some())
             .map_err(Into::into)
     }
 
@@ -245,6 +310,28 @@ impl super::SqliteStorage {
             .prepare_cached("select id from cards where nid = ? order by ord")?
             .query_and_then(&[nid], |r| Ok(CardID(r.get(0)?)))?
             .collect()
+    }
+
+    /// Place matching card ids into the search table.
+    pub(crate) fn search_siblings_for_bury(
+        &self,
+        cid: CardID,
+        nid: NoteID,
+        include_new: bool,
+        include_reviews: bool,
+    ) -> Result<()> {
+        self.setup_searched_cards_table()?;
+        self.db
+            .prepare_cached(include_str!("siblings_for_bury.sql"))?
+            .execute(params![
+                cid,
+                nid,
+                include_new,
+                CardQueue::New as i8,
+                include_reviews,
+                CardQueue::Review as i8
+            ])?;
+        Ok(())
     }
 
     pub(crate) fn note_ids_of_cards(&self, cids: &[CardID]) -> Result<HashSet<NoteID>> {
@@ -267,19 +354,30 @@ impl super::SqliteStorage {
         self.db
             .prepare_cached(concat!(
                 include_str!("get_card.sql"),
-                " where id in (select id from search_cids)"
+                " where id in (select cid from search_cids)"
             ))?
             .query_and_then(NO_PARAMS, |r| row_to_card(r).map_err(Into::into))?
             .collect()
     }
 
+    pub(crate) fn all_searched_cards_in_search_order(&self) -> Result<Vec<Card>> {
+        self.db
+            .prepare_cached(concat!(
+                include_str!("get_card.sql"),
+                ", search_cids where cards.id = search_cids.cid order by search_cids.rowid"
+            ))?
+            .query_and_then(NO_PARAMS, |r| row_to_card(r).map_err(Into::into))?
+            .collect()
+    }
+
+    /// Cards will arrive in card id order, not search order.
     pub(crate) fn for_each_card_in_search<F>(&self, mut func: F) -> Result<()>
     where
         F: FnMut(Card) -> Result<()>,
     {
         let mut stmt = self.db.prepare_cached(concat!(
             include_str!("get_card.sql"),
-            " where id in (select id from search_cids)"
+            " where id in (select cid from search_cids)"
         ))?;
         let mut rows = stmt.query(NO_PARAMS)?;
         while let Some(row) = rows.next()? {
@@ -333,6 +431,12 @@ impl super::SqliteStorage {
         Ok(())
     }
 
+    pub(crate) fn setup_searched_cards_table_to_preserve_order(&self) -> Result<()> {
+        self.db
+            .execute_batch(include_str!("search_cids_setup_ordered.sql"))?;
+        Ok(())
+    }
+
     pub(crate) fn clear_searched_cards_table(&self) -> Result<()> {
         self.db
             .execute("drop table if exists search_cids", NO_PARAMS)?;
@@ -342,8 +446,16 @@ impl super::SqliteStorage {
     /// Injects the provided card IDs into the search_cids table, for
     /// when ids have arrived outside of a search.
     /// Clear with clear_searched_cards().
-    pub(crate) fn set_search_table_to_card_ids(&mut self, cards: &[CardID]) -> Result<()> {
-        self.setup_searched_cards_table()?;
+    pub(crate) fn set_search_table_to_card_ids(
+        &mut self,
+        cards: &[CardID],
+        preserve_order: bool,
+    ) -> Result<()> {
+        if preserve_order {
+            self.setup_searched_cards_table_to_preserve_order()?;
+        } else {
+            self.setup_searched_cards_table()?;
+        }
         let mut stmt = self
             .db
             .prepare_cached("insert into search_cids values (?)")?;
@@ -379,9 +491,7 @@ impl super::SqliteStorage {
         ids_to_string(&mut ids, &affected_decks);
         let sql = include_str!("fix_low_ease.sql").replace("DECK_IDS", &ids);
 
-        self.db
-            .prepare(&sql)?
-            .execute(params![self.usn(server)?, TimestampSecs::now()])?;
+        self.db.prepare(&sql)?.execute(params![self.usn(server)?])?;
 
         Ok(())
     }

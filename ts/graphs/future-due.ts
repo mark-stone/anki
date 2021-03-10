@@ -7,15 +7,22 @@
  */
 
 import type pb from "anki/backend_proto";
-import { extent, histogram, rollup, sum, Bin } from "d3-array";
-import { scaleLinear, scaleSequential } from "d3-scale";
+import {
+    extent,
+    histogram,
+    rollup,
+    sum,
+    scaleLinear,
+    scaleSequential,
+    interpolateGreens,
+} from "d3";
+import type { Bin } from "d3";
 import { CardQueue } from "anki/cards";
 import type { HistogramData } from "./histogram-graph";
-import { interpolateGreens } from "d3-scale-chromatic";
 import { dayLabel } from "anki/time";
 import type { I18n } from "anki/i18n";
 import { GraphRange } from "./graph-helpers";
-import type { TableDatum } from "./graph-helpers";
+import type { TableDatum, SearchDispatch } from "./graph-helpers";
 
 export interface GraphData {
     dueCounts: Map<number, number>;
@@ -23,31 +30,36 @@ export interface GraphData {
 }
 
 export function gatherData(data: pb.BackendProto.GraphsOut): GraphData {
-    const isLearning = (queue: number): boolean =>
-        [CardQueue.Learn, CardQueue.PreviewRepeat].includes(queue);
+    const isLearning = (card: pb.BackendProto.Card): boolean =>
+        [CardQueue.Learn, CardQueue.PreviewRepeat].includes(card.queue);
+
     let haveBacklog = false;
     const due = (data.cards as pb.BackendProto.Card[])
-        .filter(
-            (c) =>
-                // reviews
+        .filter((c: pb.BackendProto.Card) => {
+            // reviews
+            return (
                 [CardQueue.Review, CardQueue.DayLearn].includes(c.queue) ||
-                // or learning cards due today
-                (isLearning(c.queue) && c.due < data.nextDayAtSecs)
-        )
-        .map((c) => {
-            if (isLearning(c.queue)) {
-                return 0;
+                // or learning cards
+                isLearning(c)
+            );
+        })
+        .map((c: pb.BackendProto.Card) => {
+            let dueDay: number;
+
+            if (isLearning(c)) {
+                const offset = c.due - data.nextDayAtSecs;
+                dueDay = Math.floor(offset / 86_400) + 1;
             } else {
                 // - testing just odue fails on day 1
                 // - testing just odid fails on lapsed cards that
                 //   have due calculated at regraduation time
                 const due = c.originalDeckId && c.originalDue ? c.originalDue : c.due;
-                const dueDay = due - data.daysElapsed;
-                if (dueDay < 0) {
-                    haveBacklog = true;
-                }
-                return dueDay;
+                dueDay = due - data.daysElapsed;
             }
+
+            haveBacklog = haveBacklog || dueDay < 0;
+
+            return dueDay;
         });
 
     const dueCounts = rollup(
@@ -67,11 +79,23 @@ export interface FutureDueOut {
     tableData: TableDatum[];
 }
 
+function makeQuery(start: number, end: number): string {
+    if (start === end) {
+        return `"prop:due=${start}"`;
+    } else {
+        const fromQuery = `"prop:due>=${start}"`;
+        const tillQuery = `"prop:due<=${end}"`;
+        return `${fromQuery} AND ${tillQuery}`;
+    }
+}
+
 export function buildHistogram(
     sourceData: GraphData,
     range: GraphRange,
     backlog: boolean,
-    i18n: I18n
+    i18n: I18n,
+    dispatch: SearchDispatch,
+    browserLinksSupported: boolean
 ): FutureDueOut {
     const output = { histogramData: null, tableData: [] };
     // get min/max
@@ -125,19 +149,24 @@ export function buildHistogram(
     const total = sum(bins as any, binValue);
 
     function hoverText(
-        data: HistogramData,
-        binIdx: number,
+        bin: Bin<number, number>,
         cumulative: number,
         _percent: number
     ): string {
-        const bin = data.bins[binIdx];
         const days = dayLabel(i18n, bin.x0!, bin.x1!);
         const cards = i18n.tr(i18n.TR.STATISTICS_CARDS_DUE, {
-            cards: binValue(data.bins[binIdx] as any),
+            cards: binValue(bin as any),
         });
         const totalLabel = i18n.tr(i18n.TR.STATISTICS_RUNNING_TOTAL);
 
         return `${days}:<br>${cards}<br>${totalLabel}: ${cumulative}`;
+    }
+
+    function onClick(bin: Bin<number, number>): void {
+        const start = bin.x0!;
+        const end = bin.x1! - 1;
+        const query = makeQuery(start, end);
+        dispatch("search", { query });
     }
 
     const periodDays = xMax! - xMin!;
@@ -166,6 +195,7 @@ export function buildHistogram(
             bins,
             total,
             hoverText,
+            onClick: browserLinksSupported ? onClick : null,
             showArea: true,
             colourScale,
             binValue,

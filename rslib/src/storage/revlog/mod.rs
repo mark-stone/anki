@@ -59,10 +59,16 @@ impl SqliteStorage {
         Ok(())
     }
 
-    pub(crate) fn add_revlog_entry(&self, entry: &RevlogEntry) -> Result<()> {
+    /// Returns the used id, which may differ if `ensure_unique` is true.
+    pub(crate) fn add_revlog_entry(
+        &self,
+        entry: &RevlogEntry,
+        ensure_unique: bool,
+    ) -> Result<RevlogID> {
         self.db
             .prepare_cached(include_str!("add.sql"))?
             .execute(params![
+                ensure_unique,
                 entry.id,
                 entry.cid,
                 entry.usn,
@@ -73,7 +79,7 @@ impl SqliteStorage {
                 entry.taken_millis,
                 entry.review_kind as u8
             ])?;
-        Ok(())
+        Ok(RevlogID(self.db.last_insert_rowid()))
     }
 
     pub(crate) fn get_revlog_entry(&self, id: RevlogID) -> Result<Option<RevlogEntry>> {
@@ -82,6 +88,14 @@ impl SqliteStorage {
             .query_and_then(&[id], row_to_revlog_entry)?
             .next()
             .transpose()
+    }
+
+    /// Only intended to be used by the undo code, as Anki can not sync revlog deletions.
+    pub(crate) fn remove_revlog_entry(&self, id: RevlogID) -> Result<()> {
+        self.db
+            .prepare_cached("delete from revlog where id = ?")?
+            .execute(&[id])?;
+        Ok(())
     }
 
     pub(crate) fn get_revlog_entries_for_card(&self, cid: CardID) -> Result<Vec<RevlogEntry>> {
@@ -98,7 +112,7 @@ impl SqliteStorage {
         self.db
             .prepare_cached(concat!(
                 include_str!("get.sql"),
-                " where cid in (select id from search_cids) and id >= ?"
+                " where cid in (select cid from search_cids) and id >= ?"
             ))?
             .query_and_then(&[after.0 * 1000], |r| {
                 row_to_revlog_entry(r).map(Into::into)
@@ -131,6 +145,12 @@ impl SqliteStorage {
             })?
             .next()
             .unwrap()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn upgrade_revlog_to_v2(&self) -> Result<()> {
+        self.db
+            .execute_batch(include_str!("v2_upgrade.sql"))
             .map_err(Into::into)
     }
 }
