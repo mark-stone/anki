@@ -1,24 +1,32 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::collection::Collection;
-use crate::err::{AnkiError, DBErrorKind, Result};
-use crate::i18n::{tr_args, tr_strs, TR};
-use crate::latex::extract_latex_expanding_clozes;
-use crate::log::debug;
-use crate::media::database::MediaDatabaseContext;
-use crate::media::files::{
-    data_for_file, filename_if_normalized, normalize_nfc_filename, trash_folder,
-    MEDIA_SYNC_FILESIZE_LIMIT,
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::Path,
 };
-use crate::notes::Note;
-use crate::text::{normalize_to_nfc, MediaRef};
-use crate::{media::MediaManager, text::extract_media_refs};
+
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::{borrow::Cow, fs, io};
+
+use crate::{
+    collection::Collection,
+    error::{AnkiError, DbErrorKind, Result},
+    latex::extract_latex_expanding_clozes,
+    log::debug,
+    media::{
+        database::MediaDatabaseContext,
+        files::{
+            data_for_file, filename_if_normalized, normalize_nfc_filename, trash_folder,
+            MEDIA_SYNC_FILESIZE_LIMIT,
+        },
+        MediaManager,
+    },
+    notes::Note,
+    text::{extract_media_refs, normalize_to_nfc, MediaRef},
+};
 
 lazy_static! {
     static ref REMOTE_FILENAME: Regex = Regex::new("(?i)^https?://").unwrap();
@@ -90,59 +98,41 @@ where
 
     pub fn summarize_output(&self, output: &mut MediaCheckOutput) -> String {
         let mut buf = String::new();
-        let i = &self.ctx.i18n;
+        let i = &self.ctx.tr;
 
         // top summary area
         if output.trash_count > 0 {
             let megs = (output.trash_bytes as f32) / 1024.0 / 1024.0;
-            buf += &i.trn(
-                TR::MediaCheckTrashCount,
-                tr_args!["count"=>output.trash_count, "megs"=>megs],
-            );
+            buf += &i.media_check_trash_count(output.trash_count, megs);
             buf.push('\n');
         }
 
-        buf += &i.trn(
-            TR::MediaCheckMissingCount,
-            tr_args!["count"=>output.missing.len()],
-        );
+        buf += &i.media_check_missing_count(output.missing.len());
         buf.push('\n');
 
-        buf += &i.trn(
-            TR::MediaCheckUnusedCount,
-            tr_args!["count"=>output.unused.len()],
-        );
+        buf += &i.media_check_unused_count(output.unused.len());
         buf.push('\n');
 
         if !output.renamed.is_empty() {
-            buf += &i.trn(
-                TR::MediaCheckRenamedCount,
-                tr_args!["count"=>output.renamed.len()],
-            );
+            buf += &i.media_check_renamed_count(output.renamed.len());
             buf.push('\n');
         }
         if !output.oversize.is_empty() {
-            buf += &i.trn(
-                TR::MediaCheckOversizeCount,
-                tr_args!["count"=>output.oversize.len()],
-            );
+            buf += &i.media_check_oversize_count(output.oversize.len());
             buf.push('\n');
         }
         if !output.dirs.is_empty() {
-            buf += &i.trn(
-                TR::MediaCheckSubfolderCount,
-                tr_args!["count"=>output.dirs.len()],
-            );
+            buf += &i.media_check_subfolder_count(output.dirs.len());
             buf.push('\n');
         }
 
         buf.push('\n');
 
         if !output.renamed.is_empty() {
-            buf += &i.tr(TR::MediaCheckRenamedHeader);
+            buf += &i.media_check_renamed_header();
             buf.push('\n');
             for (old, new) in &output.renamed {
-                buf += &i.trn(TR::MediaCheckRenamedFile, tr_strs!["old"=>old,"new"=>new]);
+                buf += &i.media_check_renamed_file(old.as_str(), new.as_str());
                 buf.push('\n');
             }
             buf.push('\n')
@@ -150,10 +140,10 @@ where
 
         if !output.oversize.is_empty() {
             output.oversize.sort();
-            buf += &i.tr(TR::MediaCheckOversizeHeader);
+            buf += &i.media_check_oversize_header();
             buf.push('\n');
             for fname in &output.oversize {
-                buf += &i.trn(TR::MediaCheckOversizeFile, tr_strs!["filename"=>fname]);
+                buf += &i.media_check_oversize_file(fname.as_str());
                 buf.push('\n');
             }
             buf.push('\n')
@@ -161,10 +151,10 @@ where
 
         if !output.dirs.is_empty() {
             output.dirs.sort();
-            buf += &i.tr(TR::MediaCheckSubfolderHeader);
+            buf += &i.media_check_subfolder_header();
             buf.push('\n');
             for fname in &output.dirs {
-                buf += &i.trn(TR::MediaCheckSubfolderFile, tr_strs!["filename"=>fname]);
+                buf += &i.media_check_subfolder_file(fname.as_str());
                 buf.push('\n');
             }
             buf.push('\n')
@@ -172,10 +162,10 @@ where
 
         if !output.missing.is_empty() {
             output.missing.sort();
-            buf += &i.tr(TR::MediaCheckMissingHeader);
+            buf += &i.media_check_missing_header();
             buf.push('\n');
             for fname in &output.missing {
-                buf += &i.trn(TR::MediaCheckMissingFile, tr_strs!["filename"=>fname]);
+                buf += &i.media_check_missing_file(fname.as_str());
                 buf.push('\n');
             }
             buf.push('\n')
@@ -183,10 +173,10 @@ where
 
         if !output.unused.is_empty() {
             output.unused.sort();
-            buf += &i.tr(TR::MediaCheckUnusedHeader);
+            buf += &i.media_check_unused_header();
             buf.push('\n');
             for fname in &output.unused {
-                buf += &i.trn(TR::MediaCheckUnusedFile, tr_strs!["filename"=>fname]);
+                buf += &i.media_check_unused_file(fname.as_str());
                 buf.push('\n');
             }
         }
@@ -368,10 +358,10 @@ where
         renamed: &HashMap<String, String>,
     ) -> Result<HashSet<String>> {
         let mut referenced_files = HashSet::new();
-        let note_types = self.ctx.get_all_notetypes()?;
+        let notetypes = self.ctx.get_all_notetypes()?;
         let mut collection_modified = false;
 
-        let nids = self.ctx.search_notes("")?;
+        let nids = self.ctx.search_notes_unordered("")?;
         let usn = self.ctx.usn()?;
         for nid in nids {
             self.checked += 1;
@@ -379,12 +369,9 @@ where
                 self.fire_progress_cb()?;
             }
             let mut note = self.ctx.storage.get_note(nid)?.unwrap();
-            let nt = note_types
-                .get(&note.notetype_id)
-                .ok_or_else(|| AnkiError::DBError {
-                    info: "missing note type".to_string(),
-                    kind: DBErrorKind::MissingEntity,
-                })?;
+            let nt = notetypes.get(&note.notetype_id).ok_or_else(|| {
+                AnkiError::db_error("missing note type", DbErrorKind::MissingEntity)
+            })?;
             if fix_and_extract_media_refs(
                 &mut note,
                 &mut referenced_files,
@@ -528,17 +515,22 @@ pub(crate) mod test {
     pub(crate) const MEDIACHECK_ANKI2: &[u8] =
         include_bytes!("../../tests/support/mediacheck.anki2");
 
-    use super::normalize_and_maybe_rename_files;
-    use crate::collection::{open_collection, Collection};
-    use crate::err::Result;
-    use crate::i18n::I18n;
-    use crate::log;
-    use crate::media::check::{MediaCheckOutput, MediaChecker};
-    use crate::media::files::trash_folder;
-    use crate::media::MediaManager;
-    use std::path::Path;
-    use std::{collections::HashMap, fs, io};
+    use std::{collections::HashMap, fs, io, path::Path};
+
     use tempfile::{tempdir, TempDir};
+
+    use super::normalize_and_maybe_rename_files;
+    use crate::{
+        collection::{open_collection, Collection},
+        error::Result,
+        i18n::I18n,
+        log,
+        media::{
+            check::{MediaCheckOutput, MediaChecker},
+            files::trash_folder,
+            MediaManager,
+        },
+    };
 
     fn common_setup() -> Result<(TempDir, MediaManager, Collection)> {
         let dir = tempdir()?;
@@ -551,9 +543,9 @@ pub(crate) mod test {
         let mgr = MediaManager::new(&media_dir, media_db.clone())?;
 
         let log = log::terminal();
-        let i18n = I18n::new(&["zz"], "dummy", log.clone());
+        let tr = I18n::template_only();
 
-        let col = open_collection(col_path, media_dir, media_db, false, i18n, log)?;
+        let col = open_collection(col_path, media_dir, media_db, false, tr, log)?;
 
         Ok((dir, mgr, col))
     }
@@ -572,12 +564,12 @@ pub(crate) mod test {
 
         let progress = |_n| true;
 
-        let (output, report) = col.transact(None, |ctx| {
-            let mut checker = MediaChecker::new(ctx, &mgr, progress);
+        let (output, report) = {
+            let mut checker = MediaChecker::new(&mut col, &mgr, progress);
             let output = checker.check()?;
             let summary = checker.summarize_output(&mut output.clone());
-            Ok((output, summary))
-        })?;
+            (output, summary)
+        };
 
         assert_eq!(
             output,
@@ -642,10 +634,8 @@ Unused: unused.jpg
 
         let progress = |_n| true;
 
-        col.transact(None, |ctx| {
-            let mut checker = MediaChecker::new(ctx, &mgr, progress);
-            checker.restore_trash()
-        })?;
+        let mut checker = MediaChecker::new(&mut col, &mgr, progress);
+        checker.restore_trash()?;
 
         // file should have been moved to media folder
         assert_eq!(files_in_dir(&trash_folder), Vec::<String>::new());
@@ -656,10 +646,10 @@ Unused: unused.jpg
 
         // if we repeat the process, restoring should do the same thing if the contents are equal
         fs::write(trash_folder.join("test.jpg"), "test")?;
-        col.transact(None, |ctx| {
-            let mut checker = MediaChecker::new(ctx, &mgr, progress);
-            checker.restore_trash()
-        })?;
+
+        let mut checker = MediaChecker::new(&mut col, &mgr, progress);
+        checker.restore_trash()?;
+
         assert_eq!(files_in_dir(&trash_folder), Vec::<String>::new());
         assert_eq!(
             files_in_dir(&mgr.media_folder),
@@ -668,10 +658,10 @@ Unused: unused.jpg
 
         // but rename if required
         fs::write(trash_folder.join("test.jpg"), "test2")?;
-        col.transact(None, |ctx| {
-            let mut checker = MediaChecker::new(ctx, &mgr, progress);
-            checker.restore_trash()
-        })?;
+
+        let mut checker = MediaChecker::new(&mut col, &mgr, progress);
+        checker.restore_trash()?;
+
         assert_eq!(files_in_dir(&trash_folder), Vec::<String>::new());
         assert_eq!(
             files_in_dir(&mgr.media_folder),
@@ -692,10 +682,10 @@ Unused: unused.jpg
 
         let progress = |_n| true;
 
-        let mut output = col.transact(None, |ctx| {
-            let mut checker = MediaChecker::new(ctx, &mgr, progress);
+        let mut output = {
+            let mut checker = MediaChecker::new(&mut col, &mgr, progress);
             checker.check()
-        })?;
+        }?;
 
         output.missing.sort();
 

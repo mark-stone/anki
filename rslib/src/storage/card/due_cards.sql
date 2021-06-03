@@ -3,16 +3,15 @@ SELECT queue,
   nid,
   due,
   cast(ivl AS integer),
-  cast(mod AS integer)
+  cast(mod AS integer),
+  did,
+  odid
 FROM cards
-WHERE did = ?1
+WHERE did IN (
+    SELECT id
+    FROM active_decks
+  )
   AND (
-    (
-      queue IN (2, 3)
-      AND due <= ?2
-    )
-    OR (
-      queue IN (1, 4)
-      AND due <= ?3
-    )
+    queue IN (2, 3)
+    AND due <= ?
   )

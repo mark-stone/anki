@@ -1,9 +1,19 @@
-load("@build_bazel_rules_svelte//:defs.bzl", "svelte")
 load("@npm//@bazel/typescript:index.bzl", "ts_library")
-load("@npm//@bazel/rollup:index.bzl", "rollup_bundle")
 load("//ts:prettier.bzl", "prettier_test")
 load("//ts:eslint.bzl", "eslint_test")
-load("//ts:svelte.bzl", "svelte_check")
+load("//ts/svelte:svelte.bzl", "svelte", "svelte_check")
+load("//ts:esbuild.bzl", "esbuild")
+load("//ts:compile_sass.bzl", "compile_sass")
+
+compile_sass(
+    srcs = ["congrats-base.scss"],
+    group = "base_css",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ts/sass:base_lib",
+        "//ts/sass:scrollbar_lib",
+    ],
+)
 
 svelte(
     name = "CongratsPage",
@@ -11,12 +21,13 @@ svelte(
 )
 
 ts_library(
-    name = "bootstrap",
-    srcs = ["bootstrap.ts"],
+    name = "index",
+    srcs = ["index.ts"],
     deps = [
         "CongratsPage",
         "lib",
         "//ts/lib",
+        "@npm//svelte",
         "@npm//svelte2tsx",
     ],
 )
@@ -30,22 +41,29 @@ ts_library(
     ],
 )
 
-rollup_bundle(
+esbuild(
     name = "congrats",
-    config_file = "//ts:rollup.config.js",
-    entry_point = "bootstrap.ts",
-    format = "iife",
-    link_workspace_root = True,
-    silent = True,
-    sourcemap = "false",
+    srcs = [
+        "//ts:protobuf-shim.js",
+    ],
+    args = [
+        "--global-name=anki",
+        "--inject:$(location //ts:protobuf-shim.js)",
+        "--resolve-extensions=.mjs,.js",
+        "--log-level=warning",
+    ],
+    entry_point = "index.ts",
+    external = [
+        "protobufjs/light",
+    ],
+    output_css = "congrats.css",
     visibility = ["//visibility:public"],
     deps = [
         "CongratsPage",
-        "bootstrap",
+        ":base_css",
+        ":index",
         "//ts/lib",
-        "@npm//@rollup/plugin-commonjs",
-        "@npm//@rollup/plugin-node-resolve",
-        "@npm//rollup-plugin-terser",
+        "//ts/lib:backend_proto",
     ],
 )
 

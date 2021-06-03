@@ -1,7 +1,13 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
-    import { createEventDispatcher } from "svelte";
+    import type { Writable } from "svelte/store";
 
-    import type { I18n } from "anki/i18n";
+    import InputBox from "./InputBox.svelte";
+
+    import * as tr from "lib/i18n";
     import { RevlogRange, daysToRevlogRange } from "./graph-helpers";
 
     enum SearchRange {
@@ -10,45 +16,28 @@
         Custom = 3,
     }
 
-    type UpdateEventMap = {
-        update: { days: number; search: string; searchRange: SearchRange };
-    };
+    export let loading: boolean;
 
-    export let i18n: I18n;
-    export let active: boolean;
+    export let days: Writable<number>;
+    export let search: Writable<string>;
 
-    export let days: number;
-    export let search: string;
-
-    const dispatch = createEventDispatcher<UpdateEventMap>();
-
-    let revlogRange = daysToRevlogRange(days);
-    let searchRange: SearchRange =
-        search === "deck:current"
+    let revlogRange = daysToRevlogRange($days);
+    let searchRange =
+        $search === "deck:current"
             ? SearchRange.Deck
-            : search === ""
+            : $search === ""
             ? SearchRange.Collection
             : SearchRange.Custom;
 
-    let displayedSearch = search;
-
-    const update = () => {
-        dispatch("update", {
-            days: days,
-            search: search,
-            searchRange: searchRange,
-        });
-    };
+    let displayedSearch = $search;
 
     $: {
         switch (searchRange as SearchRange) {
             case SearchRange.Deck:
-                search = displayedSearch = "deck:current";
-                update();
+                $search = displayedSearch = "deck:current";
                 break;
             case SearchRange.Collection:
-                search = displayedSearch = "";
-                update();
+                $search = displayedSearch = "";
                 break;
         }
     }
@@ -56,35 +45,32 @@
     $: {
         switch (revlogRange as RevlogRange) {
             case RevlogRange.Year:
-                days = 365;
-                update();
+                $days = 365;
                 break;
             case RevlogRange.All:
-                days = 0;
-                update();
+                $days = 0;
                 break;
         }
     }
 
-    const searchKeyUp = (e: KeyboardEvent) => {
+    function searchKeyUp(event: KeyboardEvent): void {
         // fetch data on enter
-        if (e.key == "Enter") {
-            search = displayedSearch;
-            update();
+        if (event.code === "Enter") {
+            $search = displayedSearch;
         }
-    };
+    }
 
-    const year = i18n.tr(i18n.TR.STATISTICS_RANGE_1_YEAR_HISTORY);
-    const deck = i18n.tr(i18n.TR.STATISTICS_RANGE_DECK);
-    const collection = i18n.tr(i18n.TR.STATISTICS_RANGE_COLLECTION);
-    const searchLabel = i18n.tr(i18n.TR.STATISTICS_RANGE_SEARCH);
-    const all = i18n.tr(i18n.TR.STATISTICS_RANGE_ALL_HISTORY);
+    const year = tr.statisticsRange_1YearHistory();
+    const deck = tr.statisticsRangeDeck();
+    const collection = tr.statisticsRangeCollection();
+    const searchLabel = tr.statisticsRangeSearch();
+    const all = tr.statisticsRangeAllHistory();
 </script>
 
 <div class="range-box">
-    <div class="spin" class:active>◐</div>
+    <div class="spin" class:loading>◐</div>
 
-    <div class="range-box-inner">
+    <InputBox>
         <label>
             <input type="radio" bind:group={searchRange} value={SearchRange.Deck} />
             {deck}
@@ -93,7 +79,8 @@
             <input
                 type="radio"
                 bind:group={searchRange}
-                value={SearchRange.Collection} />
+                value={SearchRange.Collection}
+            />
             {collection}
         </label>
 
@@ -104,10 +91,11 @@
             on:focus={() => {
                 searchRange = SearchRange.Custom;
             }}
-            placeholder={searchLabel} />
-    </div>
+            placeholder={searchLabel}
+        />
+    </InputBox>
 
-    <div class="range-box-inner">
+    <InputBox>
         <label>
             <input type="radio" bind:group={revlogRange} value={RevlogRange.Year} />
             {year}
@@ -116,7 +104,52 @@
             <input type="radio" bind:group={revlogRange} value={RevlogRange.All} />
             {all}
         </label>
-    </div>
+    </InputBox>
 </div>
 
 <div class="range-box-pad" />
+
+<style lang="scss">
+    .range-box {
+        position: fixed;
+        z-index: 1;
+        top: 0;
+        width: 100%;
+        color: var(--text-fg);
+        background: var(--window-bg);
+        padding: 0.5em;
+
+        @media print {
+            position: absolute;
+        }
+    }
+
+    @keyframes spin {
+        0% {
+            -webkit-transform: rotate(0deg);
+        }
+        100% {
+            -webkit-transform: rotate(360deg);
+        }
+    }
+
+    .spin {
+        display: inline-block;
+        position: absolute;
+        font-size: 2em;
+        animation: spin;
+        animation-duration: 1s;
+        animation-iteration-count: infinite;
+
+        opacity: 0;
+
+        &.loading {
+            opacity: 0.5;
+            transition: opacity 1s;
+        }
+    }
+
+    .range-box-pad {
+        height: 2em;
+    }
+</style>

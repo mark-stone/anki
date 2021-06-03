@@ -3,18 +3,22 @@
 
 pub(crate) mod undo;
 
-use crate::serde::{default_on_invalid, deserialize_int_from_number};
-use crate::{define_newtype, prelude::*};
 use num_enum::TryFromPrimitive;
 use serde::Deserialize;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::Serialize_tuple;
 
-define_newtype!(RevlogID, i64);
+use crate::{
+    define_newtype,
+    prelude::*,
+    serde::{default_on_invalid, deserialize_int_from_number},
+};
 
-impl RevlogID {
+define_newtype!(RevlogId, i64);
+
+impl RevlogId {
     pub fn new() -> Self {
-        RevlogID(TimestampMillis::now().0)
+        RevlogId(TimestampMillis::now().0)
     }
 
     pub fn as_secs(self) -> TimestampSecs {
@@ -22,16 +26,16 @@ impl RevlogID {
     }
 }
 
-impl From<TimestampMillis> for RevlogID {
+impl From<TimestampMillis> for RevlogId {
     fn from(m: TimestampMillis) -> Self {
-        RevlogID(m.0)
+        RevlogId(m.0)
     }
 }
 
 #[derive(Serialize_tuple, Deserialize, Debug, Default, PartialEq)]
 pub struct RevlogEntry {
-    pub id: RevlogID,
-    pub cid: CardID,
+    pub id: RevlogId,
+    pub cid: CardId,
     pub usn: Usn,
     /// - In the V1 scheduler, 3 represents easy in the learning case.
     /// - 0 represents manual rescheduling.
@@ -88,7 +92,7 @@ impl Collection {
         usn: Usn,
     ) -> Result<()> {
         let entry = RevlogEntry {
-            id: RevlogID::new(),
+            id: RevlogId::new(),
             cid: card.id,
             usn,
             button_chosen: 0,

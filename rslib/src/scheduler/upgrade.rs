@@ -3,14 +3,13 @@
 
 use std::collections::HashMap;
 
+use super::timing::local_minutes_west_for_stamp;
 use crate::{
     card::{CardQueue, CardType},
     config::SchedulerVersion,
     prelude::*,
     search::SortMode,
 };
-
-use super::timing::local_minutes_west_for_stamp;
 
 struct V1FilteredDeckInfo {
     /// True if the filtered deck had rescheduling enabled.
@@ -63,8 +62,8 @@ impl Card {
 
 fn get_filter_info_for_card(
     card: &Card,
-    decks: &HashMap<DeckID, Deck>,
-    configs: &HashMap<DeckConfID, DeckConf>,
+    decks: &HashMap<DeckId, Deck>,
+    configs: &HashMap<DeckConfigId, DeckConfig>,
 ) -> Option<V1FilteredDeckInfo> {
     if card.original_deck_id.0 == 0 {
         None
@@ -85,7 +84,7 @@ fn get_filter_info_for_card(
             let home_conf_id = decks
                 .get(&card.original_deck_id)
                 .and_then(|deck| deck.config_id())
-                .unwrap_or(DeckConfID(1));
+                .unwrap_or(DeckConfigId(1));
             Some(
                 configs
                     .get(&home_conf_id)
@@ -116,7 +115,6 @@ impl Collection {
             // nothing to do
             return Ok(());
         }
-
         self.storage.upgrade_revlog_to_v2()?;
         self.upgrade_cards_to_v2()?;
         self.set_scheduler_version_config_key(SchedulerVersion::V2)?;
@@ -128,7 +126,7 @@ impl Collection {
         }
 
         // force full sync
-        self.storage.set_schema_modified()
+        self.set_schema_modified()
     }
 
     fn upgrade_cards_to_v2(&mut self) -> Result<()> {
@@ -155,11 +153,12 @@ mod test {
 
     #[test]
     fn v2_card() {
-        let mut c = Card::default();
-
+        let mut c = Card {
+            ctype: CardType::Review,
+            queue: CardQueue::DayLearn,
+            ..Default::default()
+        };
         // relearning cards should be reclassified
-        c.ctype = CardType::Review;
-        c.queue = CardQueue::DayLearn;
         c.upgrade_to_v2(None);
         assert_eq!(c.ctype, CardType::Relearn);
 

@@ -3,42 +3,45 @@
 
 pub(crate) mod undo;
 
-use crate::backend_proto::note_is_duplicate_or_empty_out::State as DuplicateState;
-use crate::{
-    backend_proto as pb,
-    decks::DeckID,
-    define_newtype,
-    err::{AnkiError, Result},
-    notetype::{CardGenContext, NoteField, NoteType, NoteTypeID},
-    prelude::*,
-    template::field_is_empty,
-    text::{ensure_string_in_nfc, normalize_to_nfc, strip_html_preserving_media_filenames},
-    timestamp::TimestampSecs,
-    types::Usn,
-};
-use itertools::Itertools;
-use num_integer::Integer;
-use regex::{Regex, Replacer};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     convert::TryInto,
 };
 
-define_newtype!(NoteID, i64);
+use itertools::Itertools;
+use num_integer::Integer;
+
+use crate::{
+    backend_proto as pb,
+    backend_proto::note_is_duplicate_or_empty_out::State as DuplicateState,
+    decks::DeckId,
+    define_newtype,
+    error::{AnkiError, Result},
+    notetype::{CardGenContext, NoteField, Notetype, NotetypeId},
+    ops::StateChanges,
+    prelude::*,
+    template::field_is_empty,
+    text::{ensure_string_in_nfc, normalize_to_nfc, strip_html_preserving_media_filenames},
+    timestamp::TimestampSecs,
+    types::Usn,
+};
+
+define_newtype!(NoteId, i64);
 
 #[derive(Default)]
 pub(crate) struct TransformNoteOutput {
     pub changed: bool,
     pub generate_cards: bool,
     pub mark_modified: bool,
+    pub update_tags: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Note {
-    pub id: NoteID,
+    pub id: NoteId,
     pub guid: String,
-    pub notetype_id: NoteTypeID,
+    pub notetype_id: NotetypeId,
     pub mtime: TimestampSecs,
     pub usn: Usn,
     pub tags: Vec<String>,
@@ -48,9 +51,78 @@ pub struct Note {
 }
 
 impl Note {
-    pub(crate) fn new(notetype: &NoteType) -> Self {
+    pub fn fields(&self) -> &Vec<String> {
+        &self.fields
+    }
+
+    pub fn set_field(&mut self, idx: usize, text: impl Into<String>) -> Result<()> {
+        if idx >= self.fields.len() {
+            return Err(AnkiError::invalid_input(
+                "field idx out of range".to_string(),
+            ));
+        }
+
+        self.fields[idx] = text.into();
+        self.mark_dirty();
+
+        Ok(())
+    }
+}
+
+impl Collection {
+    pub fn add_note(&mut self, note: &mut Note, did: DeckId) -> Result<OpOutput<()>> {
+        self.transact(Op::AddNote, |col| {
+            let nt = col
+                .get_notetype(note.notetype_id)?
+                .ok_or_else(|| AnkiError::invalid_input("missing note type"))?;
+            let last_deck = col.get_last_deck_added_to_for_notetype(note.notetype_id);
+            let ctx = CardGenContext::new(&nt, last_deck, col.usn()?);
+            let norm = col.get_config_bool(BoolKey::NormalizeNoteText);
+            col.add_note_inner(&ctx, note, did, norm)
+        })
+    }
+
+    /// Remove provided notes, and any cards that use them.
+    pub fn remove_notes(&mut self, nids: &[NoteId]) -> Result<OpOutput<usize>> {
+        let usn = self.usn()?;
+        self.transact(Op::RemoveNote, |col| col.remove_notes_inner(nids, usn))
+    }
+
+    /// Update cards and field cache after notes modified externally.
+    /// If gencards is false, skip card generation.
+    pub fn after_note_updates(
+        &mut self,
+        nids: &[NoteId],
+        generate_cards: bool,
+        mark_notes_modified: bool,
+    ) -> Result<OpOutput<usize>> {
+        self.transact(Op::UpdateNote, |col| {
+            col.after_note_updates_inner(nids, generate_cards, mark_notes_modified)
+        })
+    }
+}
+
+/// Information required for updating tags while leaving note content alone.
+/// Tags are stored in their DB form, separated by spaces.
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) struct NoteTags {
+    pub id: NoteId,
+    pub mtime: TimestampSecs,
+    pub usn: Usn,
+    pub tags: String,
+}
+
+impl NoteTags {
+    pub(crate) fn set_modified(&mut self, usn: Usn) {
+        self.mtime = TimestampSecs::now();
+        self.usn = usn;
+    }
+}
+
+impl Note {
+    pub(crate) fn new(notetype: &Notetype) -> Self {
         Note {
-            id: NoteID(0),
+            id: NoteId(0),
             guid: guid(),
             notetype_id: notetype.id,
             mtime: TimestampSecs(0),
@@ -64,9 +136,9 @@ impl Note {
 
     #[allow(clippy::clippy::too_many_arguments)]
     pub(crate) fn new_from_storage(
-        id: NoteID,
+        id: NoteId,
         guid: String,
-        notetype_id: NoteTypeID,
+        notetype_id: NotetypeId,
         mtime: TimestampSecs,
         usn: Usn,
         tags: Vec<String>,
@@ -87,10 +159,6 @@ impl Note {
         }
     }
 
-    pub fn fields(&self) -> &Vec<String> {
-        &self.fields
-    }
-
     pub(crate) fn fields_mut(&mut self) -> &mut Vec<String> {
         self.mark_dirty();
         &mut self.fields
@@ -102,21 +170,8 @@ impl Note {
         self.checksum = None;
     }
 
-    pub fn set_field(&mut self, idx: usize, text: impl Into<String>) -> Result<()> {
-        if idx >= self.fields.len() {
-            return Err(AnkiError::invalid_input(
-                "field idx out of range".to_string(),
-            ));
-        }
-
-        self.fields[idx] = text.into();
-        self.mark_dirty();
-
-        Ok(())
-    }
-
     /// Prepare note for saving to the database. Does not mark it as modified.
-    pub fn prepare_for_update(&mut self, nt: &NoteType, normalize_text: bool) -> Result<()> {
+    pub(crate) fn prepare_for_update(&mut self, nt: &Notetype, normalize_text: bool) -> Result<()> {
         assert!(nt.id == self.notetype_id);
         let notetype_field_count = nt.fields.len().max(1);
         if notetype_field_count != self.fields.len() {
@@ -191,34 +246,8 @@ impl Note {
             .collect()
     }
 
-    pub(crate) fn replace_tags<T: Replacer>(&mut self, re: &Regex, mut repl: T) -> bool {
-        let mut changed = false;
-        for tag in &mut self.tags {
-            if let Cow::Owned(rep) = re.replace_all(tag, |caps: &regex::Captures| {
-                if let Some(expanded) = repl.by_ref().no_expansion() {
-                    if expanded.trim().is_empty() {
-                        "".to_string()
-                    } else {
-                        // include "::" if it was matched
-                        format!(
-                            "{}{}",
-                            expanded,
-                            caps.get(caps.len() - 1).map_or("", |m| m.as_str())
-                        )
-                    }
-                } else {
-                    tag.to_string()
-                }
-            }) {
-                *tag = rep;
-                changed = true;
-            }
-        }
-        changed
-    }
-
     /// Pad or merge fields to match note type.
-    pub(crate) fn fix_field_count(&mut self, nt: &NoteType) {
+    pub(crate) fn fix_field_count(&mut self, nt: &Notetype) {
         while self.fields.len() < nt.fields.len() {
             self.fields.push("".into())
         }
@@ -249,9 +278,9 @@ impl From<Note> for pb::Note {
 impl From<pb::Note> for Note {
     fn from(n: pb::Note) -> Self {
         Note {
-            id: NoteID(n.id),
+            id: NoteId(n.id),
             guid: n.guid,
-            notetype_id: NoteTypeID(n.notetype_id),
+            notetype_id: NotetypeId(n.notetype_id),
             mtime: TimestampSecs(n.mtime_secs as i64),
             usn: Usn(n.usn),
             tags: n.tags,
@@ -299,22 +328,11 @@ impl Collection {
         Ok(())
     }
 
-    pub fn add_note(&mut self, note: &mut Note, did: DeckID) -> Result<()> {
-        self.transact(Some(UndoableOpKind::AddNote), |col| {
-            let nt = col
-                .get_notetype(note.notetype_id)?
-                .ok_or_else(|| AnkiError::invalid_input("missing note type"))?;
-            let ctx = CardGenContext::new(&nt, col.usn()?);
-            let norm = col.get_bool(BoolKey::NormalizeNoteText);
-            col.add_note_inner(&ctx, note, did, norm)
-        })
-    }
-
     pub(crate) fn add_note_inner(
         &mut self,
         ctx: &CardGenContext,
         note: &mut Note,
-        did: DeckID,
+        did: DeckId,
         normalize_text: bool,
     ) -> Result<()> {
         self.canonify_note_tags(note, ctx.usn)?;
@@ -328,29 +346,50 @@ impl Collection {
     }
 
     #[cfg(test)]
-    pub(crate) fn update_note(&mut self, note: &mut Note) -> Result<()> {
-        self.update_note_with_op(note, Some(UndoableOpKind::UpdateNote))
+    pub(crate) fn update_note(&mut self, note: &mut Note) -> Result<OpOutput<()>> {
+        self.update_note_maybe_undoable(note, true)
     }
 
-    pub(crate) fn update_note_with_op(
+    pub(crate) fn update_note_maybe_undoable(
         &mut self,
         note: &mut Note,
-        op: Option<UndoableOpKind>,
-    ) -> Result<()> {
+        undoable: bool,
+    ) -> Result<OpOutput<()>> {
+        if undoable {
+            self.transact(Op::UpdateNote, |col| col.update_note_inner(note))
+        } else {
+            self.transact_no_undo(|col| {
+                col.update_note_inner(note)?;
+                Ok(OpOutput {
+                    output: (),
+                    changes: OpChanges {
+                        op: Op::UpdateNote,
+                        changes: StateChanges {
+                            note: true,
+                            tag: true,
+                            card: true,
+                            ..Default::default()
+                        },
+                    },
+                })
+            })
+        }
+    }
+
+    pub(crate) fn update_note_inner(&mut self, note: &mut Note) -> Result<()> {
         let mut existing_note = self.storage.get_note(note.id)?.ok_or(AnkiError::NotFound)?;
         if !note_differs_from_db(&mut existing_note, note) {
             // nothing to do
             return Ok(());
         }
-
-        self.transact(op, |col| {
-            let nt = col
-                .get_notetype(note.notetype_id)?
-                .ok_or_else(|| AnkiError::invalid_input("missing note type"))?;
-            let ctx = CardGenContext::new(&nt, col.usn()?);
-            let norm = col.get_bool(BoolKey::NormalizeNoteText);
-            col.update_note_inner_generating_cards(&ctx, note, &existing_note, true, norm)
-        })
+        let nt = self
+            .get_notetype(note.notetype_id)?
+            .ok_or_else(|| AnkiError::invalid_input("missing note type"))?;
+        let last_deck = self.get_last_deck_added_to_for_notetype(note.notetype_id);
+        let ctx = CardGenContext::new(&nt, last_deck, self.usn()?);
+        let norm = self.get_config_bool(BoolKey::NormalizeNoteText);
+        self.update_note_inner_generating_cards(&ctx, note, &existing_note, true, norm, true)?;
+        Ok(())
     }
 
     pub(crate) fn update_note_inner_generating_cards(
@@ -360,6 +399,7 @@ impl Collection {
         original: &Note,
         mark_note_modified: bool,
         normalize_text: bool,
+        update_tags: bool,
     ) -> Result<()> {
         self.update_note_inner_without_cards(
             note,
@@ -368,73 +408,74 @@ impl Collection {
             ctx.usn,
             mark_note_modified,
             normalize_text,
+            update_tags,
         )?;
         self.generate_cards_for_existing_note(ctx, note)
     }
 
+    // TODO: refactor into struct
+    #[allow(clippy::clippy::too_many_arguments)]
     pub(crate) fn update_note_inner_without_cards(
         &mut self,
         note: &mut Note,
         original: &Note,
-        nt: &NoteType,
+        nt: &Notetype,
         usn: Usn,
         mark_note_modified: bool,
         normalize_text: bool,
+        update_tags: bool,
     ) -> Result<()> {
-        self.canonify_note_tags(note, usn)?;
+        if update_tags {
+            self.canonify_note_tags(note, usn)?;
+        }
         note.prepare_for_update(nt, normalize_text)?;
         if mark_note_modified {
             note.set_modified(usn);
         }
-        self.update_note_undoable(note, original, true)
+        self.update_note_undoable(note, original)
     }
 
-    /// Remove provided notes, and any cards that use them.
-    pub(crate) fn remove_notes(&mut self, nids: &[NoteID]) -> Result<()> {
-        let usn = self.usn()?;
-        self.transact(Some(UndoableOpKind::RemoveNote), |col| {
-            for nid in nids {
-                let nid = *nid;
-                if let Some(_existing_note) = col.storage.get_note(nid)? {
-                    for card in col.storage.all_cards_of_note(nid)? {
-                        col.remove_card_and_add_grave_undoable(card, usn)?;
-                    }
-                    col.remove_note_only_undoable(nid, usn)?;
+    pub(crate) fn remove_notes_inner(&mut self, nids: &[NoteId], usn: Usn) -> Result<usize> {
+        let mut card_count = 0;
+        for nid in nids {
+            let nid = *nid;
+            if let Some(_existing_note) = self.storage.get_note(nid)? {
+                for card in self.storage.all_cards_of_note(nid)? {
+                    card_count += 1;
+                    self.remove_card_and_add_grave_undoable(card, usn)?;
                 }
+                self.remove_note_only_undoable(nid, usn)?;
             }
-
-            Ok(())
-        })
+        }
+        Ok(card_count)
     }
 
-    /// Update cards and field cache after notes modified externally.
-    /// If gencards is false, skip card generation.
-    pub(crate) fn after_note_updates(
+    fn after_note_updates_inner(
         &mut self,
-        nids: &[NoteID],
+        nids: &[NoteId],
         generate_cards: bool,
         mark_notes_modified: bool,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         self.transform_notes(nids, |_note, _nt| {
             Ok(TransformNoteOutput {
                 changed: true,
                 generate_cards,
                 mark_modified: mark_notes_modified,
+                update_tags: true,
             })
         })
-        .map(|_| ())
     }
 
     pub(crate) fn transform_notes<F>(
         &mut self,
-        nids: &[NoteID],
+        nids: &[NoteId],
         mut transformer: F,
     ) -> Result<usize>
     where
-        F: FnMut(&mut Note, &NoteType) -> Result<TransformNoteOutput>,
+        F: FnMut(&mut Note, &Notetype) -> Result<TransformNoteOutput>,
     {
         let nids_by_notetype = self.storage.note_ids_by_notetype(nids)?;
-        let norm = self.get_bool(BoolKey::NormalizeNoteText);
+        let norm = self.get_config_bool(BoolKey::NormalizeNoteText);
         let mut changed_notes = 0;
         let usn = self.usn()?;
 
@@ -454,13 +495,20 @@ impl Collection {
                 }
 
                 if out.generate_cards {
-                    let ctx = genctx.get_or_insert_with(|| CardGenContext::new(&nt, usn));
+                    let ctx = genctx.get_or_insert_with(|| {
+                        CardGenContext::new(
+                            &nt,
+                            self.get_last_deck_added_to_for_notetype(nt.id),
+                            usn,
+                        )
+                    });
                     self.update_note_inner_generating_cards(
                         &ctx,
                         &mut note,
                         &original,
                         out.mark_modified,
                         norm,
+                        out.update_tags,
                     )?;
                 } else {
                     self.update_note_inner_without_cards(
@@ -470,6 +518,7 @@ impl Collection {
                         usn,
                         out.mark_modified,
                         norm,
+                        out.update_tags,
                     )?;
                 }
 
@@ -482,7 +531,7 @@ impl Collection {
 
     pub(crate) fn note_is_duplicate_or_empty(&self, note: &Note) -> Result<DuplicateState> {
         if let Some(field1) = note.fields.get(0) {
-            let field1 = if self.get_bool(BoolKey::NormalizeNoteText) {
+            let field1 = if self.get_config_bool(BoolKey::NormalizeNoteText) {
                 normalize_to_nfc(field1)
             } else {
                 field1.into()
@@ -510,32 +559,6 @@ impl Collection {
             Ok(DuplicateState::Empty)
         }
     }
-
-    /// Update the tags of the provided note, canonifying before save. Requires a transaction.
-    /// Fixme: this currently pulls in the note type, and does more work than necessary. We
-    /// could add a separate method to the storage layer to just update the tags in the future,
-    /// though  it does slightly complicate the undo story.
-    pub(crate) fn update_note_tags<F>(&mut self, nid: NoteID, mutator: F) -> Result<()>
-    where
-        F: Fn(&mut Vec<String>),
-    {
-        self.transform_notes(&[nid], |note, _nt| {
-            let mut tags = note.tags.clone();
-            mutator(&mut tags);
-            let changed = if tags != note.tags {
-                note.tags = tags;
-                true
-            } else {
-                false
-            };
-            Ok(TransformNoteOutput {
-                changed,
-                generate_cards: false,
-                mark_modified: true,
-            })
-        })
-        .map(|_| ())
-    }
 }
 
 /// The existing note pulled from the DB will have sfld and csum set, but the
@@ -557,8 +580,8 @@ fn note_differs_from_db(existing_note: &mut Note, note: &mut Note) -> bool {
 mod test {
     use super::{anki_base91, field_checksum};
     use crate::{
-        collection::open_test_collection, config::BoolKey, decks::DeckID, err::Result, prelude::*,
-        search::SortMode,
+        collection::open_test_collection, config::BoolKey, decks::DeckId, error::Result,
+        prelude::*, search::SortMode,
     };
 
     #[test]
@@ -585,7 +608,7 @@ mod test {
 
         let mut note = nt.new_note();
         // if no cards are generated, 1 card is added
-        col.add_note(&mut note, DeckID(1)).unwrap();
+        col.add_note(&mut note, DeckId(1)).unwrap();
         let existing = col.storage.existing_cards_for_note(note.id)?;
         assert_eq!(existing.len(), 1);
         assert_eq!(existing[0].ord, 0);
@@ -607,11 +630,11 @@ mod test {
         // cloze cards also generate card 0 if no clozes are found
         let nt = col.get_notetype_by_name("cloze")?.unwrap();
         let mut note = nt.new_note();
-        col.add_note(&mut note, DeckID(1)).unwrap();
+        col.add_note(&mut note, DeckId(1)).unwrap();
         let existing = col.storage.existing_cards_for_note(note.id)?;
         assert_eq!(existing.len(), 1);
         assert_eq!(existing[0].ord, 0);
-        assert_eq!(existing[0].original_deck_id, DeckID(1));
+        assert_eq!(existing[0].original_deck_id, DeckId(1));
 
         // and generate cards for any cloze deletions
         note.fields[0] = "{{c1::foo}} {{c2::bar}} {{c3::baz}} {{c0::quux}} {{c501::over}}".into();
@@ -631,7 +654,7 @@ mod test {
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
         note.fields[0] = "\u{fa47}".into();
-        col.add_note(&mut note, DeckID(1))?;
+        col.add_note(&mut note, DeckId(1))?;
         assert_eq!(note.fields[0], "\u{6f22}");
         // non-normalized searches should be converted
         assert_eq!(col.search_cards("\u{fa47}", SortMode::NoOrder)?.len(), 1);
@@ -646,7 +669,7 @@ mod test {
         let mut note = nt.new_note();
         note.fields[0] = "\u{fa47}".into();
         col.set_config(BoolKey::NormalizeNoteText, &false).unwrap();
-        col.add_note(&mut note, DeckID(1))?;
+        col.add_note(&mut note, DeckId(1))?;
         assert_eq!(note.fields[0], "\u{fa47}");
         // normalized searches won't match
         assert_eq!(col.search_cards("\u{6f22}", SortMode::NoOrder)?.len(), 0);
@@ -664,24 +687,24 @@ mod test {
             .unwrap();
 
         let assert_initial = |col: &mut Collection| -> Result<()> {
-            assert_eq!(col.search_notes("")?.len(), 0);
+            assert_eq!(col.search_notes_unordered("")?.len(), 0);
             assert_eq!(col.search_cards("", SortMode::NoOrder)?.len(), 0);
             assert_eq!(
                 col.storage.db_scalar::<u32>("select count() from graves")?,
                 0
             );
-            assert_eq!(col.next_card()?.is_some(), false);
+            assert_eq!(col.get_next_card()?.is_some(), false);
             Ok(())
         };
 
         let assert_after_add = |col: &mut Collection| -> Result<()> {
-            assert_eq!(col.search_notes("")?.len(), 1);
+            assert_eq!(col.search_notes_unordered("")?.len(), 1);
             assert_eq!(col.search_cards("", SortMode::NoOrder)?.len(), 2);
             assert_eq!(
                 col.storage.db_scalar::<u32>("select count() from graves")?,
                 0
             );
-            assert_eq!(col.next_card()?.is_some(), true);
+            assert_eq!(col.get_next_card()?.is_some(), true);
             Ok(())
         };
 
@@ -691,7 +714,7 @@ mod test {
         note.set_field(0, "a")?;
         note.set_field(1, "b")?;
 
-        col.add_note(&mut note, DeckID(1)).unwrap();
+        col.add_note(&mut note, DeckId(1)).unwrap();
 
         assert_after_add(&mut col)?;
         col.undo()?;
@@ -702,20 +725,20 @@ mod test {
         assert_initial(&mut col)?;
 
         let assert_after_remove = |col: &mut Collection| -> Result<()> {
-            assert_eq!(col.search_notes("")?.len(), 0);
+            assert_eq!(col.search_notes_unordered("")?.len(), 0);
             assert_eq!(col.search_cards("", SortMode::NoOrder)?.len(), 0);
             // 1 note + 2 cards
             assert_eq!(
                 col.storage.db_scalar::<u32>("select count() from graves")?,
                 3
             );
-            assert_eq!(col.next_card()?.is_some(), false);
+            assert_eq!(col.get_next_card()?.is_some(), false);
             Ok(())
         };
 
         col.redo()?;
         assert_after_add(&mut col)?;
-        let nids = col.search_notes("")?;
+        let nids = col.search_notes_unordered("")?;
         col.remove_notes(&nids)?;
         assert_after_remove(&mut col)?;
         col.undo()?;

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# -*- coding: UTF-8 -*-
-import os
-import json
-import re
-import sys
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 import copy
+import json
+import os
+import re
 import shutil
+import sys
+
 from fluent.syntax import parse, serialize
-from fluent.syntax.ast import Message, TextElement, Identifier, Pattern, Junk
+from fluent.syntax.ast import Identifier, Junk, Message, Pattern, TextElement
 
 # clone an existing ftl string as a new key
 # eg:

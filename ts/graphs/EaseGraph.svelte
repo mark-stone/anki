@@ -1,17 +1,24 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
+    import type pb from "lib/backend_proto";
+    import * as tr from "lib/i18n";
+    import type { PreferenceStore } from "sveltelib/preferences";
+
+    import { createEventDispatcher } from "svelte";
+
+    import HistogramGraph from "./HistogramGraph.svelte";
+    import Graph from "./Graph.svelte";
+    import TableData from "./TableData.svelte";
+
     import type { HistogramData } from "./histogram-graph";
     import { gatherData, prepareData } from "./ease";
-    import type pb from "anki/backend_proto";
-    import HistogramGraph from "./HistogramGraph.svelte";
-    import type { I18n } from "anki/i18n";
     import type { TableDatum, SearchEventMap } from "./graph-helpers";
-    import TableData from "./TableData.svelte";
-    import { createEventDispatcher } from "svelte";
-    import type { PreferenceStore } from "./preferences";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
-    export let i18n: I18n;
-    export let preferences: PreferenceStore;
+    export let preferences: PreferenceStore<pb.BackendProto.GraphPreferences>;
 
     const dispatch = createEventDispatcher<SearchEventMap>();
 
@@ -22,22 +29,17 @@
     $: if (sourceData) {
         [histogramData, tableData] = prepareData(
             gatherData(sourceData),
-            i18n,
             dispatch,
             $browserLinksSupported
         );
     }
 
-    const title = i18n.tr(i18n.TR.STATISTICS_CARD_EASE_TITLE);
-    const subtitle = i18n.tr(i18n.TR.STATISTICS_CARD_EASE_SUBTITLE);
+    const title = tr.statisticsCardEaseTitle();
+    const subtitle = tr.statisticsCardEaseSubtitle();
 </script>
 
-<div class="graph" id="graph-ease">
-    <h1>{title}</h1>
+<Graph {title} {subtitle}>
+    <HistogramGraph data={histogramData} />
 
-    <div class="subtitle">{subtitle}</div>
-
-    <HistogramGraph data={histogramData} {i18n} />
-
-    <TableData {i18n} {tableData} />
-</div>
+    <TableData {tableData} />
+</Graph>

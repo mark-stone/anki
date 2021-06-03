@@ -12,6 +12,8 @@ body {
     color: var(--text-fg);
     background: var(--window-bg);
     margin: 1em;
+    transition: opacity 0.5s ease-out;
+    overscroll-behavior: none;
 }
 
 a {

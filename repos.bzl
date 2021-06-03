@@ -26,18 +26,18 @@ def register_repos():
     ########
 
     # native.local_repository(
-    #     name = "io_bazel_rules_rust",
+    #     name = "rules_rust",
     #     path = "../rules_rust",
     # )
 
     maybe(
         http_archive,
-        name = "io_bazel_rules_rust",
-        strip_prefix = "rules_rust-anki-2020-12-10",
+        name = "rules_rust",
+        strip_prefix = "rules_rust-anki-2021-04-09",
         urls = [
-            "https://github.com/ankitects/rules_rust/archive/anki-2020-12-10.tar.gz",
+            "https://github.com/ankitects/rules_rust/archive/anki-2021-04-09.tar.gz",
         ],
-        sha256 = "80a7647c3c1992c434a462bf424b9138c3c9af6c794ac112f636ca7c8c53180e",
+        sha256 = "2821b22e065c1b4dc73610b1d6ccbed7ed4d755b316e7e0641cd079b7abe4900",
     )
 
     # python
@@ -85,11 +85,25 @@ def register_repos():
     #     ],
     # )
 
+    # when updating, remember to update pinned versions in package.json
     maybe(
         http_archive,
         name = "build_bazel_rules_nodejs",
-        sha256 = "6142e9586162b179fdd570a55e50d1332e7d9c030efd853453438d607569721d",
-        urls = ["https://github.com/bazelbuild/rules_nodejs/releases/download/3.0.0/rules_nodejs-3.0.0.tar.gz"],
+        sha256 = "4a5d654a4ccd4a4c24eca5d319d85a88a650edf119601550c95bf400c8cc897e",
+        urls = ["https://github.com/bazelbuild/rules_nodejs/releases/download/3.5.1/rules_nodejs-3.5.1.tar.gz"],
+    )
+
+    # native.local_repository(
+    #     name = "esbuild_toolchain",
+    #     path = "../esbuild_toolchain",
+    # )
+
+    maybe(
+        http_archive,
+        name = "esbuild_toolchain",
+        sha256 = "7385dfb2acce6517fcfdb16480cf18d1959bafb83d8cddc0c1e95779609f762c",
+        urls = ["https://github.com/ankitects/esbuild_toolchain/archive/refs/tags/anki-2021-06-01.tar.gz"],
+        strip_prefix = "esbuild_toolchain-anki-2021-06-01",
     )
 
     # sass
@@ -110,34 +124,16 @@ def register_repos():
         sha256 = "224ae14b8d2166b3ab4c5fa9b2ae1828f30620ac628dc152e6c0859c7853bb97",
     )
 
-    # svelte
-    ##########
-
-    # native.local_repository(
-    #     name = "build_bazel_rules_svelte",
-    #     path = "../rules_svelte",
-    # )
-
-    maybe(
-        http_archive,
-        name = "build_bazel_rules_svelte",
-        strip_prefix = "rules_svelte-anki-2021-02-06",
-        urls = [
-            "https://github.com/ankitects/rules_svelte/archive/anki-2021-02-06.tar.gz",
-        ],
-        sha256 = "f77a96ae5a354f8c3c24045f3bee8521bfe56224292d4f71184a3382784640eb",
-    )
-
     # translations
     ################
 
     core_i18n_repo = "anki-core-i18n"
-    core_i18n_commit = "08132e398863b7c57ac3345c34c96db7f346a385"
-    core_i18n_zip_csum = "24ed30d44bd277f0b19080084cb2bc5bf2cd8f6e691362928e7cb96f33ffda4c"
+    core_i18n_commit = "001b8647793874e6abfa86c6bb8cb4574f4d35dd"
+    core_i18n_zip_csum = "d39eebc70166f07a1f6ecef37b631beb27d47ce0a3f461033bdd2cce574510a7"
 
     qtftl_i18n_repo = "anki-desktop-ftl"
-    qtftl_i18n_commit = "3668fb523ffa8162d5de878e6037f6cf9a98f97d"
-    qtftl_i18n_zip_csum = "2cb5b89d125edd1d3a6d7349b8aa2f1dc3a0a007aaf3d1f4ca08ea353e6676ee"
+    qtftl_i18n_commit = "bb0f33c4f79ba8864d17a4785e993c3c6785a05c"
+    qtftl_i18n_zip_csum = "99a15d0432a45f04b751184a5e2fc855cc71b72b92330346c0cb82c0d5755ac7"
 
     i18n_build_content = """
 filegroup(

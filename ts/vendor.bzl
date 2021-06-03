@@ -4,8 +4,11 @@ Helpers to copy runtime dependencies from node_modules.
 
 load("//ts:copy.bzl", "copy_select_files")
 
+def _npm_base_from_name(name):
+    return "external/npm/node_modules/{}/".format(name)
+
 def _vendor_js_lib_impl(ctx):
-    base = ctx.attr.base or "external/npm/node_modules/{}/".format(ctx.attr.name)
+    base = ctx.attr.base or _npm_base_from_name(ctx.attr.name)
     return copy_select_files(
         ctx = ctx,
         files = ctx.attr.pkg.files,
@@ -26,8 +29,9 @@ vendor_js_lib = rule(
     },
 )
 
-def _pkg_from_name(name):
-    return "@npm//{0}:{0}__files".format(name)
+def pkg_from_name(name):
+    tail = name.split("/")[-1]
+    return "@npm//{0}:{1}__files".format(name, tail)
 
 #
 # These could be defined directly in BUILD files, but defining them as
@@ -37,7 +41,7 @@ def _pkg_from_name(name):
 def copy_jquery(name = "jquery", visibility = ["//visibility:public"]):
     vendor_js_lib(
         name = name,
-        pkg = _pkg_from_name(name),
+        pkg = pkg_from_name(name),
         include = [
             "dist/jquery.min.js",
         ],
@@ -48,7 +52,7 @@ def copy_jquery(name = "jquery", visibility = ["//visibility:public"]):
 def copy_jquery_ui(name = "jquery-ui", visibility = ["//visibility:public"]):
     vendor_js_lib(
         name = name,
-        pkg = _pkg_from_name("jquery-ui-dist"),
+        pkg = pkg_from_name("jquery-ui-dist"),
         base = "external/npm/node_modules/jquery-ui-dist/",
         include = [
             "jquery-ui.min.js",
@@ -59,7 +63,7 @@ def copy_jquery_ui(name = "jquery-ui", visibility = ["//visibility:public"]):
 def copy_protobufjs(name = "protobufjs", visibility = ["//visibility:public"]):
     vendor_js_lib(
         name = name,
-        pkg = _pkg_from_name(name),
+        pkg = pkg_from_name(name),
         include = [
             "dist/protobuf.min.js",
         ],
@@ -70,7 +74,7 @@ def copy_protobufjs(name = "protobufjs", visibility = ["//visibility:public"]):
 def copy_mathjax(name = "mathjax", visibility = ["//visibility:public"]):
     vendor_js_lib(
         name = name,
-        pkg = _pkg_from_name(name),
+        pkg = pkg_from_name(name),
         include = [
             "es5/tex-chtml.js",
             "es5/input/tex/extensions",
@@ -88,7 +92,7 @@ def copy_mathjax(name = "mathjax", visibility = ["//visibility:public"]):
 def copy_css_browser_selector(name = "css-browser-selector", visibility = ["//visibility:public"]):
     vendor_js_lib(
         name = name,
-        pkg = _pkg_from_name(name),
+        pkg = pkg_from_name(name),
         include = [
             "css_browser_selector.min.js",
         ],
@@ -98,18 +102,19 @@ def copy_css_browser_selector(name = "css-browser-selector", visibility = ["//vi
 def copy_bootstrap_js(name = "bootstrap-js", visibility = ["//visibility:public"]):
     vendor_js_lib(
         name = name,
-        pkg = _pkg_from_name(name),
+        pkg = pkg_from_name("bootstrap"),
         include = [
             "dist/js/bootstrap.bundle.min.js",
         ],
         strip_prefix = "dist/js/",
         visibility = visibility,
+        base = "external/npm/node_modules/bootstrap/",
     )
 
 def copy_bootstrap_css(name = "bootstrap-css", visibility = ["//visibility:public"]):
     vendor_js_lib(
         name = name,
-        pkg = _pkg_from_name(name),
+        pkg = pkg_from_name("bootstrap"),
         include = [
             "dist/css/bootstrap.min.css",
         ],
@@ -117,15 +122,22 @@ def copy_bootstrap_css(name = "bootstrap-css", visibility = ["//visibility:publi
         visibility = visibility,
     )
 
-def copy_bootstrap_icons(name = "bootstrap-icons", visibility = ["//visibility:public"]):
+def copy_bootstrap_icons(name = "bootstrap-icons", icons = [], visibility = ["//visibility:public"]):
     vendor_js_lib(
         name = name,
-        pkg = _pkg_from_name(name),
-        include = [
-            "font/bootstrap-icons.css",
-            "font/fonts/bootstrap-icons.woff",
-            "font/fonts/bootstrap-icons.woff2",
-        ],
-        strip_prefix = "font/",
+        pkg = pkg_from_name(name),
+        include = ["icons/{}".format(icon) for icon in icons],
+        strip_prefix = "icons/",
         visibility = visibility,
     )
+
+def copy_mdi_icons(name = "mdi-icons", icons = [], visibility = ["//visibility:public"]):
+    vendor_js_lib(
+        name = name,
+        pkg = pkg_from_name("@mdi/svg"),
+        base = _npm_base_from_name("@mdi/svg"),
+        include = ["svg/{}".format(icon) for icon in icons],
+        strip_prefix = "svg/",
+        visibility = visibility,
+    )
+

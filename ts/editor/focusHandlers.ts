@@ -1,11 +1,11 @@
-/* Copyright: Ankitects Pty Ltd and contributors
- * License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html */
+// Copyright: Ankitects Pty Ltd and contributors
+// License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+import { enableButtons, disableButtons } from "./toolbar";
 import type { EditingArea } from "./editingArea";
 
 import { saveField } from "./changeTimer";
 import { bridgeCommand } from "./lib";
-import { enableButtons, disableButtons } from "./toolbar";
 
 export function onFocus(evt: FocusEvent): void {
     const currentField = evt.currentTarget as EditingArea;

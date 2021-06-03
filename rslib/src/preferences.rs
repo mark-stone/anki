@@ -3,13 +3,13 @@
 
 use crate::{
     backend_proto::{
-        preferences::scheduling::NewReviewMix as NewRevMixPB,
-        preferences::{Editing, Reviewing, Scheduling},
+        preferences::{scheduling::NewReviewMix as NewRevMixPB, Editing, Reviewing, Scheduling},
         Preferences,
     },
     collection::Collection,
     config::BoolKey,
-    err::Result,
+    error::Result,
+    prelude::*,
     scheduler::timing::local_minutes_west_for_stamp,
 };
 
@@ -22,17 +22,13 @@ impl Collection {
         })
     }
 
-    pub fn set_preferences(&mut self, prefs: Preferences) -> Result<()> {
-        self.transact(
-            Some(crate::undo::UndoableOpKind::UpdatePreferences),
-            |col| col.set_preferences_inner(prefs),
-        )
+    pub fn set_preferences(&mut self, prefs: Preferences) -> Result<OpOutput<()>> {
+        self.transact(Op::UpdatePreferences, |col| {
+            col.set_preferences_inner(prefs)
+        })
     }
 
-    fn set_preferences_inner(
-        &mut self,
-        prefs: Preferences,
-    ) -> Result<(), crate::prelude::AnkiError> {
+    fn set_preferences_inner(&mut self, prefs: Preferences) -> Result<()> {
         if let Some(sched) = prefs.scheduling {
             self.set_scheduling_preferences(sched)?;
         }
@@ -49,7 +45,13 @@ impl Collection {
         Ok(Scheduling {
             scheduler_version: match self.scheduler_version() {
                 crate::config::SchedulerVersion::V1 => 1,
-                crate::config::SchedulerVersion::V2 => 2,
+                crate::config::SchedulerVersion::V2 => {
+                    if self.get_config_bool(BoolKey::Sched2021) {
+                        3
+                    } else {
+                        2
+                    }
+                }
             },
             rollover: self.rollover_for_current_scheduler()? as u32,
             learn_ahead_secs: self.learn_ahead_secs(),
@@ -59,14 +61,14 @@ impl Collection {
                 crate::config::NewReviewMix::NewFirst => NewRevMixPB::NewFirst,
             } as i32,
             new_timezone: self.get_creation_utc_offset().is_some(),
-            day_learn_first: self.get_bool(BoolKey::ShowDayLearningCardsFirst),
+            day_learn_first: self.get_config_bool(BoolKey::ShowDayLearningCardsFirst),
         })
     }
 
     pub(crate) fn set_scheduling_preferences(&mut self, settings: Scheduling) -> Result<()> {
         let s = settings;
 
-        self.set_bool(BoolKey::ShowDayLearningCardsFirst, s.day_learn_first)?;
+        self.set_config_bool_inner(BoolKey::ShowDayLearningCardsFirst, s.day_learn_first)?;
         self.set_learn_ahead_secs(s.learn_ahead_secs)?;
 
         self.set_new_review_mix(match s.new_review_mix() {
@@ -94,26 +96,28 @@ impl Collection {
 
     pub fn get_reviewing_preferences(&self) -> Result<Reviewing> {
         Ok(Reviewing {
-            hide_audio_play_buttons: self.get_bool(BoolKey::HideAudioPlayButtons),
-            interrupt_audio_when_answering: self.get_bool(BoolKey::InterruptAudioWhenAnswering),
-            show_remaining_due_counts: self.get_bool(BoolKey::ShowRemainingDueCountsInStudy),
-            show_intervals_on_buttons: self.get_bool(BoolKey::ShowIntervalsAboveAnswerButtons),
+            hide_audio_play_buttons: self.get_config_bool(BoolKey::HideAudioPlayButtons),
+            interrupt_audio_when_answering: self
+                .get_config_bool(BoolKey::InterruptAudioWhenAnswering),
+            show_remaining_due_counts: self.get_config_bool(BoolKey::ShowRemainingDueCountsInStudy),
+            show_intervals_on_buttons: self
+                .get_config_bool(BoolKey::ShowIntervalsAboveAnswerButtons),
             time_limit_secs: self.get_answer_time_limit_secs(),
         })
     }
 
     pub(crate) fn set_reviewing_preferences(&mut self, settings: Reviewing) -> Result<()> {
         let s = settings;
-        self.set_bool(BoolKey::HideAudioPlayButtons, s.hide_audio_play_buttons)?;
-        self.set_bool(
+        self.set_config_bool_inner(BoolKey::HideAudioPlayButtons, s.hide_audio_play_buttons)?;
+        self.set_config_bool_inner(
             BoolKey::InterruptAudioWhenAnswering,
             s.interrupt_audio_when_answering,
         )?;
-        self.set_bool(
+        self.set_config_bool_inner(
             BoolKey::ShowRemainingDueCountsInStudy,
             s.show_remaining_due_counts,
         )?;
-        self.set_bool(
+        self.set_config_bool_inner(
             BoolKey::ShowIntervalsAboveAnswerButtons,
             s.show_intervals_on_buttons,
         )?;
@@ -123,20 +127,21 @@ impl Collection {
 
     pub fn get_editing_preferences(&self) -> Result<Editing> {
         Ok(Editing {
-            adding_defaults_to_current_deck: self.get_bool(BoolKey::AddingDefaultsToCurrentDeck),
-            paste_images_as_png: self.get_bool(BoolKey::PasteImagesAsPng),
-            paste_strips_formatting: self.get_bool(BoolKey::PasteStripsFormatting),
+            adding_defaults_to_current_deck: self
+                .get_config_bool(BoolKey::AddingDefaultsToCurrentDeck),
+            paste_images_as_png: self.get_config_bool(BoolKey::PasteImagesAsPng),
+            paste_strips_formatting: self.get_config_bool(BoolKey::PasteStripsFormatting),
         })
     }
 
     pub(crate) fn set_editing_preferences(&mut self, settings: Editing) -> Result<()> {
         let s = settings;
-        self.set_bool(
+        self.set_config_bool_inner(
             BoolKey::AddingDefaultsToCurrentDeck,
             s.adding_defaults_to_current_deck,
         )?;
-        self.set_bool(BoolKey::PasteImagesAsPng, s.paste_images_as_png)?;
-        self.set_bool(BoolKey::PasteStripsFormatting, s.paste_strips_formatting)?;
+        self.set_config_bool_inner(BoolKey::PasteImagesAsPng, s.paste_images_as_png)?;
+        self.set_config_bool_inner(BoolKey::PasteStripsFormatting, s.paste_strips_formatting)?;
         Ok(())
     }
 }

@@ -36,6 +36,10 @@ class ThemeManager:
     _icon_size = 128
     _dark_mode_available: Optional[bool] = None
 
+    # Qt applies a gradient to the buttons in dark mode
+    # from about #505050 to #606060.
+    DARK_MODE_BUTTON_BG_MIDPOINT = "#555555"
+
     def macos_dark_mode(self) -> bool:
         "True if the user has night mode on, and has forced native widgets."
         if not isMac:
@@ -86,12 +90,12 @@ class ThemeManager:
         else:
             # specified colours
             icon = QIcon(path.path)
-            img = icon.pixmap(16)
-            painter = QPainter(img)
+            pixmap = icon.pixmap(16)
+            painter = QPainter(pixmap)
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(img.rect(), QColor(path.current_color(self.night_mode)))
+            painter.fillRect(pixmap.rect(), QColor(path.current_color(self.night_mode)))
             painter.end()
-            icon = QIcon(img)
+            icon = QIcon(pixmap)
             return icon
 
         return cache.setdefault(path, icon)

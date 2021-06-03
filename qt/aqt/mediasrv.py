@@ -20,14 +20,19 @@ from waitress.server import create_server
 
 import aqt
 from anki import hooks
-from anki.collection import GraphPreferences
+from anki.collection import GraphPreferences, OpChanges
+from anki.decks import UpdateDeckConfigs
+from anki.scheduler.v3 import NextStates
 from anki.utils import devMode, from_json_bytes
+from aqt.deckoptions import DeckOptionsDialog
+from aqt.operations.deck import update_deck_configs
 from aqt.qt import *
 from aqt.utils import aqt_data_folder
 
 
 def _getExportFolder() -> str:
-    data_folder = aqt_data_folder()
+    if not (data_folder := os.getenv("ANKI_DATA_FOLDER")):
+        data_folder = aqt_data_folder()
     webInSrcFolder = os.path.abspath(os.path.join(data_folder, "web"))
     if os.path.exists(webInSrcFolder):
         return webInSrcFolder
@@ -63,10 +68,11 @@ class MediaServer(threading.Thread):
                 logging.basicConfig()
             logging.getLogger("waitress").setLevel(logging.ERROR)
 
+            desired_host = os.getenv("ANKI_API_HOST", "127.0.0.1")
             desired_port = int(os.getenv("ANKI_API_PORT", "0"))
             self.server = create_server(
                 app,
-                host="127.0.0.1",
+                host=desired_host,
                 port=desired_port,
                 clear_untrusted_proxy_headers=True,
             )
@@ -269,12 +275,64 @@ def congrats_info() -> bytes:
     return aqt.mw.col.congrats_info()
 
 
+def i18n_resources() -> bytes:
+    args = from_json_bytes(request.data)
+    return aqt.mw.col.i18n_resources(modules=args["modules"])
+
+
+def deck_configs_for_update() -> bytes:
+    args = from_json_bytes(request.data)
+    msg = aqt.mw.col.decks.get_deck_configs_for_update(deck_id=args["deckId"])
+    msg.have_addons = aqt.mw.addonManager.dirty
+    return msg.SerializeToString()
+
+
+def update_deck_configs_request() -> bytes:
+    # the regular change tracking machinery expects to be started on the main
+    # thread and uses a callback on success, so we need to run this op on
+    # main, and return immediately from the web request
+
+    input = UpdateDeckConfigs()
+    input.ParseFromString(request.data)
+
+    def on_success(changes: OpChanges) -> None:
+        if isinstance(window := aqt.mw.app.activeWindow(), DeckOptionsDialog):
+            window.reject()
+
+    def handle_on_main() -> None:
+        update_deck_configs(parent=aqt.mw, input=input).success(
+            on_success
+        ).run_in_background()
+
+    aqt.mw.taskman.run_on_main(handle_on_main)
+    return b""
+
+
+def next_card_states() -> bytes:
+    if states := aqt.mw.reviewer.get_next_states():
+        return states.SerializeToString()
+    else:
+        return b""
+
+
+def set_next_card_states() -> bytes:
+    key = request.headers.get("key", "")
+    input = NextStates()
+    input.ParseFromString(request.data)
+    aqt.mw.reviewer.set_next_states(key, input)
+    return b""
+
+
 post_handlers = {
     "graphData": graph_data,
     "graphPreferences": graph_preferences,
     "setGraphPreferences": set_graph_preferences,
+    "deckConfigsForUpdate": deck_configs_for_update,
+    "updateDeckConfigs": update_deck_configs_request,
+    "nextCardStates": next_card_states,
+    "setNextCardStates": set_next_card_states,
     # pylint: disable=unnecessary-lambda
-    "i18nResources": lambda: aqt.mw.col.i18n_resources(),
+    "i18nResources": i18n_resources,
     "congratsInfo": congrats_info,
 }
 

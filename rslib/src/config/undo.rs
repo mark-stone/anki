@@ -21,16 +21,19 @@ impl Collection {
                     .get_config_entry(&entry.key)?
                     .ok_or_else(|| AnkiError::invalid_input("config disappeared"))?;
                 self.update_config_entry_undoable(entry, current)
+                    .map(|_| ())
             }
             UndoableConfigChange::Removed(entry) => self.add_config_entry_undoable(entry),
         }
     }
 
-    pub(super) fn set_config_undoable(&mut self, entry: Box<ConfigEntry>) -> Result<()> {
+    /// True if added, or value changed.
+    pub(super) fn set_config_undoable(&mut self, entry: Box<ConfigEntry>) -> Result<bool> {
         if let Some(original) = self.storage.get_config_entry(&entry.key)? {
             self.update_config_entry_undoable(entry, original)
         } else {
-            self.add_config_entry_undoable(entry)
+            self.add_config_entry_undoable(entry)?;
+            Ok(true)
         }
     }
 
@@ -49,16 +52,19 @@ impl Collection {
         Ok(())
     }
 
+    /// True if new value differed.
     fn update_config_entry_undoable(
         &mut self,
         entry: Box<ConfigEntry>,
         original: Box<ConfigEntry>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if entry.value != original.value {
             self.save_undo(UndoableConfigChange::Updated(original));
             self.storage.set_config_entry(&entry)?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 }
 
@@ -71,40 +77,40 @@ mod test {
     fn undo() -> Result<()> {
         let mut col = open_test_collection();
         // the op kind doesn't matter, we just need undo enabled
-        let op = Some(UndoableOpKind::Bury);
+        let op = Op::Bury;
         // test key
         let key = BoolKey::NormalizeNoteText;
 
         // not set by default, but defaults to true
-        assert_eq!(col.get_bool(key), true);
+        assert_eq!(col.get_config_bool(key), true);
 
         // first set adds the key
-        col.transact(op, |col| col.set_bool(key, false))?;
-        assert_eq!(col.get_bool(key), false);
+        col.transact(op.clone(), |col| col.set_config_bool_inner(key, false))?;
+        assert_eq!(col.get_config_bool(key), false);
 
         // mutate it twice
-        col.transact(op, |col| col.set_bool(key, true))?;
-        assert_eq!(col.get_bool(key), true);
-        col.transact(op, |col| col.set_bool(key, false))?;
-        assert_eq!(col.get_bool(key), false);
+        col.transact(op.clone(), |col| col.set_config_bool_inner(key, true))?;
+        assert_eq!(col.get_config_bool(key), true);
+        col.transact(op.clone(), |col| col.set_config_bool_inner(key, false))?;
+        assert_eq!(col.get_config_bool(key), false);
 
         // when we remove it, it goes back to its default
-        col.transact(op, |col| col.remove_config(key))?;
-        assert_eq!(col.get_bool(key), true);
+        col.transact(op, |col| col.remove_config_inner(key))?;
+        assert_eq!(col.get_config_bool(key), true);
 
         // undo the removal
         col.undo()?;
-        assert_eq!(col.get_bool(key), false);
+        assert_eq!(col.get_config_bool(key), false);
 
         // undo the mutations
         col.undo()?;
-        assert_eq!(col.get_bool(key), true);
+        assert_eq!(col.get_config_bool(key), true);
         col.undo()?;
-        assert_eq!(col.get_bool(key), false);
+        assert_eq!(col.get_config_bool(key), false);
 
         // and undo the initial add
         col.undo()?;
-        assert_eq!(col.get_bool(key), true);
+        assert_eq!(col.get_config_bool(key), true);
 
         Ok(())
     }

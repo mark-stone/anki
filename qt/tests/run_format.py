@@ -1,3 +1,6 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 import os
 import subprocess
 import sys
@@ -14,6 +17,10 @@ if __name__ == "__main__":
         folder = os.path.join(os.path.dirname(__file__), "..")
         os.chdir(folder)
         args = ["--diff", "--check"]
+
+    # work around issue with latest black
+    if sys.platform == "win32" and "HOME" in os.environ:
+        os.environ["USERPROFILE"] = os.environ["HOME"]
 
     retcode = subprocess.run(
         [

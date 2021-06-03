@@ -1,4 +1,5 @@
-# coding: utf-8
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import copy
 import os
@@ -10,7 +11,7 @@ import pytest
 from anki import hooks
 from anki.consts import *
 from anki.lang import without_unicode_isolation
-from anki.schedv2 import UnburyCurrentDeck
+from anki.scheduler import UnburyDeck
 from anki.utils import intTime
 from tests.shared import getEmptyCol as getEmptyColOrig
 
@@ -26,7 +27,7 @@ def getEmptyCol():
     col = getEmptyColOrig()
     col.upgrade_to_v2_scheduler()
     if is_2021():
-        col.set_2021_test_scheduler_enabled(True)
+        col.set_v3_scheduler(True)
     return col
 
 
@@ -327,7 +328,10 @@ def test_learn_day():
     # if we fail it, it should be back in the correct queue
     col.sched.answerCard(c, 1)
     assert c.queue == QUEUE_TYPE_LRN
-    col.undo()
+    if is_2021():
+        col.undo()
+    else:
+        col.undo_legacy()
     col.reset()
     c = col.sched.getCard()
     col.sched.answerCard(c, 3)
@@ -425,7 +429,8 @@ def test_reviews():
 
     hooks.card_did_leech.append(onLeech)
     col.sched.answerCard(c, 1)
-    assert hooked
+    if not is_2021():
+        assert hooked
     assert c.queue == QUEUE_TYPE_SUSPENDED
     c.load()
     assert c.queue == QUEUE_TYPE_SUSPENDED
@@ -470,8 +475,6 @@ def review_limits_setup() -> Tuple[anki.collection.Collection, Dict]:
 
 
 def test_review_limits():
-    if is_2021():
-        pytest.skip("old sched only")
     col, child = review_limits_setup()
 
     tree = col.sched.deck_due_tree().children
@@ -492,30 +495,6 @@ def test_review_limits():
     tree = col.sched.deck_due_tree().children
     assert tree[0].review_count == 4  # parent
     assert tree[0].children[0].review_count == 9  # child
-
-
-def test_review_limits_new():
-    if not is_2021():
-        pytest.skip("new sched only")
-    col, child = review_limits_setup()
-
-    tree = col.sched.deck_due_tree().children
-    assert tree[0].review_count == 5  # parent
-    assert tree[0].children[0].review_count == 5  # child capped by parent
-
-    # child .counts() are bound by parents
-    col.decks.select(child["id"])
-    col.sched.reset()
-    assert col.sched.counts() == (0, 0, 5)
-
-    # answering a card in the child should decrement both child and parent count
-    c = col.sched.getCard()
-    col.sched.answerCard(c, 3)
-    assert col.sched.counts() == (0, 0, 4)
-
-    tree = col.sched.deck_due_tree().children
-    assert tree[0].review_count == 4  # parent
-    assert tree[0].children[0].review_count == 4  # child
 
 
 def test_button_spacing():
@@ -669,18 +648,20 @@ def test_bury():
     col.reset()
     assert not col.sched.getCard()
 
-    col.sched.unbury_cards_in_current_deck(UnburyCurrentDeck.USER_ONLY)
+    col.sched.unbury_deck(deck_id=col.decks.get_current_id(), mode=UnburyDeck.USER_ONLY)
     c.load()
     assert c.queue == QUEUE_TYPE_NEW
     c2.load()
     assert c2.queue == QUEUE_TYPE_SIBLING_BURIED
 
-    col.sched.unbury_cards_in_current_deck(UnburyCurrentDeck.SCHED_ONLY)
+    col.sched.unbury_deck(
+        deck_id=col.decks.get_current_id(), mode=UnburyDeck.SCHED_ONLY
+    )
     c2.load()
     assert c2.queue == QUEUE_TYPE_NEW
 
     col.sched.bury_cards([c.id, c2.id])
-    col.sched.unbury_cards_in_current_deck()
+    col.sched.unbury_deck(deck_id=col.decks.get_current_id())
 
     col.reset()
 
@@ -904,7 +885,7 @@ def test_ordcycle():
     t["afmt"] = "{{Front}}"
     mm.addTemplate(m, t)
     t = mm.newTemplate("f2")
-    t["qfmt"] = "{{Front}}"
+    t["qfmt"] = "{{Front}}2"
     t["afmt"] = "{{Back}}"
     mm.addTemplate(m, t)
     mm.save(m)
@@ -1211,7 +1192,13 @@ def test_reorder():
     assert note2.cards()[0].due == 2
     assert note3.cards()[0].due == 3
     assert note4.cards()[0].due == 4
-    col.sched.sortCards([note3.cards()[0].id, note4.cards()[0].id], start=1, shift=True)
+    col.sched.reposition_new_cards(
+        [note3.cards()[0].id, note4.cards()[0].id],
+        starting_from=1,
+        shift_existing=True,
+        step_size=1,
+        randomize=False,
+    )
     assert note.cards()[0].due == 3
     assert note2.cards()[0].due == 4
     assert note3.cards()[0].due == 1

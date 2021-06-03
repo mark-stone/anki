@@ -5,29 +5,30 @@ pub mod http;
 mod http_client;
 mod server;
 
+use std::collections::HashMap;
+
+use http_client::HttpSyncClient;
+pub use http_client::{FullSyncProgressFn, Timeouts};
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use serde_tuple::Serialize_tuple;
+pub(crate) use server::{LocalServer, SyncServer};
+
 use crate::{
     backend_proto::{sync_status_out, SyncStatusOut},
     card::{Card, CardQueue, CardType},
-    deckconf::DeckConfSchema11,
+    deckconfig::DeckConfSchema11,
     decks::DeckSchema11,
-    err::SyncErrorKind,
+    error::{SyncError, SyncErrorKind},
     notes::Note,
-    notetype::{NoteType, NoteTypeSchema11},
+    notetype::{Notetype, NotetypeSchema11},
     prelude::*,
     revlog::RevlogEntry,
     serde::{default_on_invalid, deserialize_int_from_number},
     storage::open_and_check_sqlite_file,
     tags::{join_tags, split_tags, Tag},
 };
-pub use http_client::FullSyncProgressFn;
-use http_client::HTTPSyncClient;
-pub use http_client::Timeouts;
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use serde_tuple::Serialize_tuple;
-pub(crate) use server::{LocalServer, SyncServer};
-use std::collections::HashMap;
 
 pub static SYNC_VERSION_MIN: u8 = 7;
 pub static SYNC_VERSION_MAX: u8 = 10;
@@ -75,9 +76,9 @@ pub struct SyncMeta {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Graves {
-    pub(crate) cards: Vec<CardID>,
-    pub(crate) decks: Vec<DeckID>,
-    pub(crate) notes: Vec<NoteID>,
+    pub(crate) cards: Vec<CardId>,
+    pub(crate) decks: Vec<DeckId>,
+    pub(crate) notes: Vec<NoteId>,
 }
 
 #[derive(Serialize_tuple, Deserialize, Debug, Default)]
@@ -89,7 +90,7 @@ pub struct DecksAndConfig {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct UnchunkedChanges {
     #[serde(rename = "models")]
-    notetypes: Vec<NoteTypeSchema11>,
+    notetypes: Vec<NotetypeSchema11>,
     #[serde(rename = "decks")]
     decks_and_config: DecksAndConfig,
     tags: Vec<String>,
@@ -113,18 +114,18 @@ pub struct Chunk {
     notes: Vec<NoteEntry>,
 }
 
-struct ChunkableIDs {
-    revlog: Vec<RevlogID>,
-    cards: Vec<CardID>,
-    notes: Vec<NoteID>,
+struct ChunkableIds {
+    revlog: Vec<RevlogId>,
+    cards: Vec<CardId>,
+    notes: Vec<NoteId>,
 }
 
 #[derive(Serialize_tuple, Deserialize, Debug)]
 pub struct NoteEntry {
-    pub id: NoteID,
+    pub id: NoteId,
     pub guid: String,
     #[serde(rename = "mid")]
-    pub ntid: NoteTypeID,
+    pub ntid: NotetypeId,
     #[serde(rename = "mod")]
     pub mtime: TimestampSecs,
     pub usn: Usn,
@@ -138,9 +139,9 @@ pub struct NoteEntry {
 
 #[derive(Serialize_tuple, Deserialize, Debug)]
 pub struct CardEntry {
-    pub id: CardID,
-    pub nid: NoteID,
-    pub did: DeckID,
+    pub id: CardId,
+    pub nid: NoteId,
+    pub did: DeckId,
     pub ord: u16,
     #[serde(deserialize_with = "deserialize_int_from_number")]
     pub mtime: TimestampSecs,
@@ -157,7 +158,7 @@ pub struct CardEntry {
     pub left: u32,
     #[serde(deserialize_with = "deserialize_int_from_number")]
     pub odue: i32,
-    pub odid: DeckID,
+    pub odid: DeckId,
     pub flags: u8,
     pub data: String,
 }
@@ -339,10 +340,10 @@ where
                         self.col.storage.rollback_trx()?;
                         let _ = self.remote.abort().await;
 
-                        if let AnkiError::SyncError {
-                            kind: SyncErrorKind::DatabaseCheckRequired,
+                        if let AnkiError::SyncError(SyncError {
                             info,
-                        } = &e
+                            kind: SyncErrorKind::DatabaseCheckRequired,
+                        }) = &e
                         {
                             debug!(self.col.log, "sanity check failed:\n{}", info);
                         }
@@ -359,10 +360,10 @@ where
         debug!(self.col.log, "remote {:?}", &remote);
         if !remote.should_continue {
             debug!(self.col.log, "server says abort"; "message"=>&remote.server_message);
-            return Err(AnkiError::SyncError {
-                info: remote.server_message,
-                kind: SyncErrorKind::ServerMessage,
-            });
+            return Err(AnkiError::sync_error(
+                remote.server_message,
+                SyncErrorKind::ServerMessage,
+            ));
         }
 
         let local = self.col.sync_meta()?;
@@ -370,11 +371,7 @@ where
         let delta = remote.current_time.0 - local.current_time.0;
         if delta.abs() > 300 {
             debug!(self.col.log, "clock off"; "delta"=>delta);
-            return Err(AnkiError::SyncError {
-                // fixme: need to rethink error handling; defer translation and pass in time difference
-                info: "".into(),
-                kind: SyncErrorKind::ClockIncorrect,
-            });
+            return Err(AnkiError::sync_error("", SyncErrorKind::ClockIncorrect));
         }
 
         Ok(local.compared_to_remote(remote))
@@ -551,10 +548,10 @@ where
         let out: SanityCheckOut = self.remote.sanity_check(local_counts).await?;
         debug!(self.col.log, "got server reply");
         if out.status != SanityCheckStatus::Ok {
-            Err(AnkiError::SyncError {
-                info: format!("local {:?}\nremote {:?}", out.client, out.server),
-                kind: SyncErrorKind::DatabaseCheckRequired,
-            })
+            Err(AnkiError::sync_error(
+                format!("local {:?}\nremote {:?}", out.client, out.server),
+                SyncErrorKind::DatabaseCheckRequired,
+            ))
         } else {
             Ok(())
         }
@@ -593,7 +590,7 @@ impl Graves {
 }
 
 pub async fn sync_login(username: &str, password: &str) -> Result<SyncAuth> {
-    let mut remote = HTTPSyncClient::new(None, 0);
+    let mut remote = HttpSyncClient::new(None, 0);
     remote.login(username, password).await?;
     Ok(SyncAuth {
         hkey: remote.hkey().to_string(),
@@ -602,23 +599,21 @@ pub async fn sync_login(username: &str, password: &str) -> Result<SyncAuth> {
 }
 
 pub async fn sync_abort(hkey: String, host_number: u32) -> Result<()> {
-    let mut remote = HTTPSyncClient::new(Some(hkey), host_number);
+    let mut remote = HttpSyncClient::new(Some(hkey), host_number);
     remote.abort().await
 }
 
 pub(crate) async fn get_remote_sync_meta(auth: SyncAuth) -> Result<SyncMeta> {
-    let remote = HTTPSyncClient::new(Some(auth.hkey), auth.host_number);
+    let remote = HttpSyncClient::new(Some(auth.hkey), auth.host_number);
     remote.meta().await
 }
 
 impl Collection {
     pub fn get_local_sync_status(&mut self) -> Result<sync_status_out::Required> {
-        let last_sync = self.storage.get_last_sync()?;
-        let schema_mod = self.storage.get_schema_mtime()?;
-        let normal_mod = self.storage.get_modified_time()?;
-        let required = if schema_mod > last_sync {
+        let stamps = self.storage.get_collection_timestamps()?;
+        let required = if stamps.schema_changed_since_sync() {
             sync_status_out::Required::FullSync
-        } else if normal_mod > last_sync {
+        } else if stamps.collection_changed_since_sync() {
             sync_status_out::Required::NormalSync
         } else {
             sync_status_out::Required::NoChanges
@@ -638,7 +633,7 @@ impl Collection {
     {
         NormalSyncer::new(
             self,
-            Box::new(HTTPSyncClient::new(Some(auth.hkey), auth.host_number)),
+            Box::new(HttpSyncClient::new(Some(auth.hkey), auth.host_number)),
             progress_fn,
         )
         .sync()
@@ -647,7 +642,7 @@ impl Collection {
 
     /// Upload collection to AnkiWeb. Caller must re-open afterwards.
     pub async fn full_upload(self, auth: SyncAuth, progress_fn: FullSyncProgressFn) -> Result<()> {
-        let mut server = HTTPSyncClient::new(Some(auth.hkey), auth.host_number);
+        let mut server = HttpSyncClient::new(Some(auth.hkey), auth.host_number);
         server.set_full_sync_progress_fn(Some(progress_fn));
         self.full_upload_inner(Box::new(server)).await
         // remote.upload(&col_path, progress_fn).await?;
@@ -666,7 +661,7 @@ impl Collection {
         auth: SyncAuth,
         progress_fn: FullSyncProgressFn,
     ) -> Result<()> {
-        let mut server = HTTPSyncClient::new(Some(auth.hkey), auth.host_number);
+        let mut server = HttpSyncClient::new(Some(auth.hkey), auth.host_number);
         server.set_full_sync_progress_fn(Some(progress_fn));
         self.full_download_inner(Box::new(server)).await
     }
@@ -685,16 +680,15 @@ impl Collection {
         // overwrite existing collection atomically
         out_file
             .persist(&col_path)
-            .map_err(|e| AnkiError::IOError {
-                info: format!("download save failed: {}", e),
-            })?;
+            .map_err(|e| AnkiError::IoError(format!("download save failed: {}", e)))?;
         Ok(())
     }
 
     fn sync_meta(&self) -> Result<SyncMeta> {
+        let stamps = self.storage.get_collection_timestamps()?;
         Ok(SyncMeta {
-            modified: self.storage.get_modified_time()?,
-            schema: self.storage.get_schema_mtime()?,
+            modified: stamps.collection_change,
+            schema: stamps.schema_change,
             usn: self.storage.usn(true)?,
             current_time: TimestampSecs::now(),
             server_message: "".into(),
@@ -750,7 +744,7 @@ impl Collection {
         &mut self,
         pending_usn: Usn,
         new_usn: Option<Usn>,
-    ) -> Result<Vec<NoteTypeSchema11>> {
+    ) -> Result<Vec<NotetypeSchema11>> {
         let ids = self
             .storage
             .objects_pending_sync("notetypes", pending_usn)?;
@@ -760,7 +754,7 @@ impl Collection {
         ids.into_iter()
             .map(|id| {
                 self.storage.get_notetype(id).map(|opt| {
-                    let mut nt: NoteTypeSchema11 = opt.unwrap().into();
+                    let mut nt: NotetypeSchema11 = opt.unwrap().into();
                     nt.usn = new_usn.unwrap_or(nt.usn);
                     nt
                 })
@@ -834,7 +828,7 @@ impl Collection {
         self.merge_deck_config(remote.decks_and_config.config)?;
         self.merge_tags(remote.tags, latest_usn)?;
         if let Some(crt) = remote.creation_stamp {
-            self.storage.set_creation_stamp(crt)?;
+            self.set_creation_stamp(crt)?;
         }
         if let Some(config) = remote.config {
             self.storage
@@ -844,18 +838,18 @@ impl Collection {
         Ok(())
     }
 
-    fn merge_notetypes(&mut self, notetypes: Vec<NoteTypeSchema11>, latest_usn: Usn) -> Result<()> {
+    fn merge_notetypes(&mut self, notetypes: Vec<NotetypeSchema11>, latest_usn: Usn) -> Result<()> {
         for nt in notetypes {
-            let mut nt: NoteType = nt.into();
+            let mut nt: Notetype = nt.into();
             let proceed = if let Some(existing_nt) = self.storage.get_notetype(nt.id)? {
                 if existing_nt.mtime_secs <= nt.mtime_secs {
                     if (existing_nt.fields.len() != nt.fields.len())
                         || (existing_nt.templates.len() != nt.templates.len())
                     {
-                        return Err(AnkiError::SyncError {
-                            info: "notetype schema changed".into(),
-                            kind: SyncErrorKind::ResyncRequired,
-                        });
+                        return Err(AnkiError::sync_error(
+                            "notetype schema changed",
+                            SyncErrorKind::ResyncRequired,
+                        ));
                     }
                     true
                 } else {
@@ -866,7 +860,7 @@ impl Collection {
             };
             if proceed {
                 self.ensure_notetype_name_unique(&mut nt, latest_usn)?;
-                self.storage.add_or_update_notetype(&nt)?;
+                self.storage.add_or_update_notetype_with_existing_id(&nt)?;
                 self.state.notetype_cache.remove(&nt.id);
             }
         }
@@ -899,7 +893,8 @@ impl Collection {
             };
             if proceed {
                 let conf = conf.into();
-                self.storage.add_or_update_deck_config(&conf)?;
+                self.storage
+                    .add_or_update_deck_config_with_existing_id(&conf)?;
             }
         }
         Ok(())
@@ -978,8 +973,8 @@ impl Collection {
     // Local->remote chunks
     //----------------------------------------------------------------
 
-    fn get_chunkable_ids(&self, pending_usn: Usn) -> Result<ChunkableIDs> {
-        Ok(ChunkableIDs {
+    fn get_chunkable_ids(&self, pending_usn: Usn) -> Result<ChunkableIds> {
+        Ok(ChunkableIds {
             revlog: self.storage.objects_pending_sync("revlog", pending_usn)?,
             cards: self.storage.objects_pending_sync("cards", pending_usn)?,
             notes: self.storage.objects_pending_sync("notes", pending_usn)?,
@@ -987,7 +982,7 @@ impl Collection {
     }
 
     /// Fetch a chunk of ids from `ids`, returning the referenced objects.
-    fn get_chunk(&self, ids: &mut ChunkableIDs, new_usn: Option<Usn>) -> Result<Chunk> {
+    fn get_chunk(&self, ids: &mut ChunkableIds, new_usn: Option<Usn>) -> Result<Chunk> {
         // get a bunch of IDs
         let mut limit = CHUNK_SIZE as i32;
         let mut revlog_ids = vec![];
@@ -1200,16 +1195,14 @@ mod test {
 
     use async_trait::async_trait;
     use lazy_static::lazy_static;
-
-    use super::server::LocalServer;
-    use super::*;
-    use crate::log;
-    use crate::{
-        collection::open_collection, deckconf::DeckConf, decks::DeckKind, i18n::I18n,
-        notetype::all_stock_notetypes, search::SortMode,
-    };
     use tempfile::{tempdir, TempDir};
     use tokio::runtime::Runtime;
+
+    use super::{server::LocalServer, *};
+    use crate::{
+        collection::open_collection, deckconfig::DeckConfig, decks::DeckKind, i18n::I18n, log,
+        notetype::all_stock_notetypes, search::SortMode,
+    };
 
     fn norm_progress(_: NormalSyncProgress, _: bool) {}
 
@@ -1228,15 +1221,15 @@ mod test {
         } else {
             Box::new(LocalTestContext {})
         };
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(upload_download(&ctx))?;
         rt.block_on(regular_sync(&ctx))
     }
 
     fn open_col(dir: &Path, server: bool, fname: &str) -> Result<Collection> {
         let path = dir.join(fname);
-        let i18n = I18n::new(&[""], "", log::terminal());
-        open_collection(path, "".into(), "".into(), server, i18n, log::terminal())
+        let tr = I18n::template_only();
+        open_collection(path, "".into(), "".into(), server, tr, log::terminal())
     }
 
     #[async_trait(?Send)]
@@ -1295,9 +1288,9 @@ mod test {
     }
 
     impl RemoteTestContext {
-        fn server_inner(&self) -> HTTPSyncClient {
+        fn server_inner(&self) -> HttpSyncClient {
             let auth = self.auth.clone();
-            HTTPSyncClient::new(Some(auth.hkey), auth.host_number)
+            HttpSyncClient::new(Some(auth.hkey), auth.host_number)
         }
     }
 
@@ -1327,7 +1320,7 @@ mod test {
         let nt = col.get_notetype_by_name("Basic").unwrap().unwrap();
         let mut note = nt.new_note();
         note.set_field(0, "1").unwrap();
-        col.add_note(&mut note, DeckID(1)).unwrap();
+        col.add_note(&mut note, DeckId(1)).unwrap();
 
         // // set our schema time back, so when initial server
         // // col is created, it's not identical
@@ -1337,6 +1330,7 @@ mod test {
         //     .unwrap()
     }
 
+    #[allow(clippy::borrowed_box)]
     async fn upload_download(ctx: &Box<dyn TestContext>) -> Result<()> {
         let mut col1 = ctx.col1();
         col1_setup(&mut col1);
@@ -1371,6 +1365,7 @@ mod test {
     // Regular syncs
     /////////////////////
 
+    #[allow(clippy::borrowed_box)]
     async fn regular_sync(ctx: &Box<dyn TestContext>) -> Result<()> {
         // add a deck
         let mut col1 = ctx.col1();
@@ -1379,18 +1374,18 @@ mod test {
         let mut deck = col1.get_or_create_normal_deck("new deck")?;
 
         // give it a new option group
-        let mut dconf = DeckConf {
+        let mut dconf = DeckConfig {
             name: "new dconf".into(),
             ..Default::default()
         };
-        col1.add_or_update_deck_config(&mut dconf, false)?;
+        col1.add_or_update_deck_config(&mut dconf)?;
         if let DeckKind::Normal(deck) = &mut deck.kind {
             deck.config_id = dconf.id.0;
         }
         col1.add_or_update_deck(&mut deck)?;
 
         // and a new notetype
-        let mut nt = all_stock_notetypes(&col1.i18n).remove(0);
+        let mut nt = all_stock_notetypes(&col1.tr).remove(0);
         nt.name = "new".into();
         col1.add_notetype(&mut nt)?;
 
@@ -1403,8 +1398,8 @@ mod test {
         // mock revlog entry
         col1.storage.add_revlog_entry(
             &RevlogEntry {
-                id: RevlogID(123),
-                cid: CardID(456),
+                id: RevlogId(123),
+                cid: CardId(456),
                 usn: Usn(-1),
                 interval: 10,
                 ..Default::default()
@@ -1433,8 +1428,8 @@ mod test {
         let deckid = deck.id;
         let dconfid = dconf.id;
         let noteid = note.id;
-        let cardid = col1.search_cards(&format!("nid:{}", note.id), SortMode::NoOrder)?[0];
-        let revlogid = RevlogID(123);
+        let cardid = col1.search_cards(note.id, SortMode::NoOrder)?[0];
+        let revlogid = RevlogId(123);
 
         let compare_sides = |col1: &mut Collection, col2: &mut Collection| -> Result<()> {
             assert_eq!(
@@ -1503,12 +1498,12 @@ mod test {
         })?;
 
         let mut deck = col2.storage.get_deck(deck.id)?.unwrap();
-        deck.name = "newer".into();
+        deck.name = NativeDeckName::from_native_str("newer");
         col2.add_or_update_deck(&mut deck)?;
 
         let mut nt = col2.storage.get_notetype(nt.id)?.unwrap();
         nt.name = "newer".into();
-        col2.update_notetype(&mut nt, false)?;
+        col2.update_notetype(&mut nt)?;
 
         // sync the changes back
         let out = ctx.normal_sync(&mut col2).await;
@@ -1532,7 +1527,7 @@ mod test {
         col1.remove_cards_and_orphaned_notes(&[cardid])?;
         let usn = col1.usn()?;
         col1.remove_note_only_undoable(noteid, usn)?;
-        col1.remove_deck_and_child_decks(deckid)?;
+        col1.remove_decks_and_child_decks(&[deckid])?;
 
         let out = ctx.normal_sync(&mut col1).await;
         assert_eq!(out.required, SyncActionRequired::NoChanges);
@@ -1550,14 +1545,17 @@ mod test {
         // removing things like a notetype forces a full sync
         col2.remove_notetype(ntid)?;
         let out = ctx.normal_sync(&mut col2).await;
-        assert!(matches!(out.required, SyncActionRequired::FullSyncRequired { .. }));
+        assert!(matches!(
+            out.required,
+            SyncActionRequired::FullSyncRequired { .. }
+        ));
         Ok(())
     }
 
     // Helper to reproduce issues with a copy of the client and server collections.
     // #[test]
     // fn repro_test() {
-    //     let mut rt = Runtime::new().unwrap();
+    //     let rt = Runtime::new().unwrap();
     //     rt.block_on(repro_test_inner()).unwrap();
     // }
 

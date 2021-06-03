@@ -1,19 +1,27 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
+    import type pb from "lib/backend_proto";
+    import type { PreferenceStore } from "sveltelib/preferences";
+
     import { createEventDispatcher } from "svelte";
+
+    import Graph from "./Graph.svelte";
+    import InputBox from "./InputBox.svelte";
     import NoDataOverlay from "./NoDataOverlay.svelte";
     import AxisTicks from "./AxisTicks.svelte";
+
     import { defaultGraphBounds, RevlogRange } from "./graph-helpers";
     import type { SearchEventMap } from "./graph-helpers";
     import { gatherData, renderCalendar } from "./calendar";
-    import type { PreferenceStore } from "./preferences";
     import type { GraphData } from "./calendar";
-    import type pb from "anki/backend_proto";
-    import type { I18n } from "anki/i18n";
 
-    export let sourceData: pb.BackendProto.GraphsOut | null = null;
-    export let preferences: PreferenceStore | null = null;
+    export let sourceData: pb.BackendProto.GraphsOut;
+    export let preferences: PreferenceStore<pb.BackendProto.GraphPreferences>;
     export let revlogRange: RevlogRange;
-    export let i18n: I18n;
+    import * as tr from "lib/i18n";
     export let nightMode: boolean;
 
     let { calendarFirstDayOfWeek } = preferences;
@@ -55,20 +63,17 @@
             graphData,
             dispatch,
             targetYear,
-            i18n,
             nightMode,
             revlogRange,
             calendarFirstDayOfWeek.set
         );
     }
 
-    const title = i18n.tr(i18n.TR.STATISTICS_CALENDAR_TITLE);
+    const title = tr.statisticsCalendarTitle();
 </script>
 
-<div class="graph" id="graph-calendar">
-    <h1>{title}</h1>
-
-    <div class="range-box-inner">
+<Graph {title}>
+    <InputBox>
         <span>
             <button on:click={() => targetYear--} disabled={minYear >= targetYear}>
                 ◄
@@ -80,12 +85,12 @@
                 ►
             </button>
         </span>
-    </div>
+    </InputBox>
 
     <svg bind:this={svg} viewBox={`0 0 ${bounds.width} ${bounds.height}`}>
         <g class="weekdays" />
         <g class="days" />
         <AxisTicks {bounds} />
-        <NoDataOverlay {bounds} {i18n} />
+        <NoDataOverlay {bounds} />
     </svg>
-</div>
+</Graph>

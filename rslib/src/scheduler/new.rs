@@ -1,17 +1,16 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{
-    card::{Card, CardID, CardQueue, CardType},
-    collection::Collection,
-    decks::DeckID,
-    err::Result,
-    notes::NoteID,
-    search::SortMode,
-    types::Usn,
-};
-use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
+
+use rand::seq::SliceRandom;
+
+use crate::{
+    card::{CardQueue, CardType},
+    deckconfig::NewCardInsertOrder,
+    prelude::*,
+    search::{SearchNode, SortMode, StateKind},
+};
 
 impl Card {
     fn schedule_as_new(&mut self, position: u32) {
@@ -23,20 +22,22 @@ impl Card {
         self.ease_factor = 0;
     }
 
-    /// If the card is new, change its position.
-    fn set_new_position(&mut self, position: u32) {
+    /// If the card is new, change its position, and return true.
+    fn set_new_position(&mut self, position: u32) -> bool {
         if self.queue != CardQueue::New || self.ctype != CardType::New {
-            return;
+            false
+        } else {
+            self.due = position as i32;
+            true
         }
-        self.due = position as i32;
     }
 }
 pub(crate) struct NewCardSorter {
-    position: HashMap<NoteID, u32>,
+    position: HashMap<NoteId, u32>,
 }
 
 #[derive(PartialEq)]
-pub enum NewCardSortOrder {
+pub enum NewCardDueOrder {
     NoteId,
     Random,
     Preserve,
@@ -47,7 +48,7 @@ impl NewCardSorter {
         cards: &[Card],
         starting_from: u32,
         step: u32,
-        order: NewCardSortOrder,
+        order: NewCardDueOrder,
     ) -> Self {
         let nids = nids_in_desired_order(cards, order);
 
@@ -68,26 +69,26 @@ impl NewCardSorter {
     }
 }
 
-fn nids_in_desired_order(cards: &[Card], order: NewCardSortOrder) -> Vec<NoteID> {
-    if order == NewCardSortOrder::Preserve {
+fn nids_in_desired_order(cards: &[Card], order: NewCardDueOrder) -> Vec<NoteId> {
+    if order == NewCardDueOrder::Preserve {
         nids_in_preserved_order(cards)
     } else {
         let nids: HashSet<_> = cards.iter().map(|c| c.note_id).collect();
         let mut nids: Vec<_> = nids.into_iter().collect();
         match order {
-            NewCardSortOrder::NoteId => {
+            NewCardDueOrder::NoteId => {
                 nids.sort_unstable();
             }
-            NewCardSortOrder::Random => {
+            NewCardDueOrder::Random => {
                 nids.shuffle(&mut rand::thread_rng());
             }
-            NewCardSortOrder::Preserve => unreachable!(),
+            NewCardDueOrder::Preserve => unreachable!(),
         }
         nids
     }
 }
 
-fn nids_in_preserved_order(cards: &[Card]) -> Vec<NoteID> {
+fn nids_in_preserved_order(cards: &[Card]) -> Vec<NoteId> {
     let mut seen = HashSet::new();
     cards
         .iter()
@@ -102,10 +103,10 @@ fn nids_in_preserved_order(cards: &[Card]) -> Vec<NoteID> {
 }
 
 impl Collection {
-    pub fn reschedule_cards_as_new(&mut self, cids: &[CardID], log: bool) -> Result<()> {
+    pub fn reschedule_cards_as_new(&mut self, cids: &[CardId], log: bool) -> Result<OpOutput<()>> {
         let usn = self.usn()?;
         let mut position = self.get_next_card_position();
-        self.transact(None, |col| {
+        self.transact(Op::ScheduleAsNew, |col| {
             col.storage.set_search_table_to_card_ids(cids, true)?;
             let cards = col.storage.all_searched_cards_in_search_order()?;
             for mut card in cards {
@@ -114,62 +115,82 @@ impl Collection {
                 if log {
                     col.log_manually_scheduled_review(&card, &original, usn)?;
                 }
-                col.update_card_inner(&mut card, &original, usn)?;
+                col.update_card_inner(&mut card, original, usn)?;
                 position += 1;
             }
             col.set_next_card_position(position)?;
-            col.storage.clear_searched_cards_table()?;
-            Ok(())
+            col.storage.clear_searched_cards_table()
         })
     }
 
     pub fn sort_cards(
         &mut self,
-        cids: &[CardID],
+        cids: &[CardId],
         starting_from: u32,
         step: u32,
-        order: NewCardSortOrder,
+        order: NewCardDueOrder,
         shift: bool,
-    ) -> Result<()> {
+    ) -> Result<OpOutput<usize>> {
         let usn = self.usn()?;
-        self.transact(None, |col| {
+        self.transact(Op::SortCards, |col| {
             col.sort_cards_inner(cids, starting_from, step, order, shift, usn)
         })
     }
 
     fn sort_cards_inner(
         &mut self,
-        cids: &[CardID],
+        cids: &[CardId],
         starting_from: u32,
         step: u32,
-        order: NewCardSortOrder,
+        order: NewCardDueOrder,
         shift: bool,
         usn: Usn,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         if shift {
             self.shift_existing_cards(starting_from, step * cids.len() as u32, usn)?;
         }
         self.storage.set_search_table_to_card_ids(cids, true)?;
         let cards = self.storage.all_searched_cards_in_search_order()?;
         let sorter = NewCardSorter::new(&cards, starting_from, step, order);
+        let mut count = 0;
         for mut card in cards {
             let original = card.clone();
-            card.set_new_position(sorter.position(&card));
-            self.update_card_inner(&mut card, &original, usn)?;
+            if card.set_new_position(sorter.position(&card)) {
+                count += 1;
+                self.update_card_inner(&mut card, original, usn)?;
+            }
         }
-        self.storage.clear_searched_cards_table()
+        self.storage.clear_searched_cards_table()?;
+        Ok(count)
     }
 
-    /// This creates a transaction - we probably want to split it out
-    /// in the future if calling it as part of a deck options update.
-    pub fn sort_deck(&mut self, deck: DeckID, random: bool) -> Result<()> {
-        let cids = self.search_cards(&format!("did:{}", deck), SortMode::NoOrder)?;
-        let order = if random {
-            NewCardSortOrder::Random
-        } else {
-            NewCardSortOrder::NoteId
-        };
-        self.sort_cards(&cids, 1, 1, order, false)
+    /// This is handled by update_deck_configs() now; this function has been kept around
+    /// for now to support the old deck config screen.
+    pub fn sort_deck_legacy(&mut self, deck: DeckId, random: bool) -> Result<OpOutput<usize>> {
+        self.transact(Op::SortCards, |col| {
+            col.sort_deck(
+                deck,
+                if random {
+                    NewCardInsertOrder::Random
+                } else {
+                    NewCardInsertOrder::Due
+                },
+                col.usn()?,
+            )
+        })
+    }
+
+    pub(crate) fn sort_deck(
+        &mut self,
+        deck: DeckId,
+        order: NewCardInsertOrder,
+        usn: Usn,
+    ) -> Result<usize> {
+        let cids = self.search_cards(
+            match_all![SearchNode::DeckIdWithoutChildren(deck), StateKind::New],
+            SortMode::NoOrder,
+        )?;
+        self.sort_cards_inner(&cids, 1, 1, order.into(), false, usn)
     }
 
     fn shift_existing_cards(&mut self, start: u32, by: u32, usn: Usn) -> Result<()> {
@@ -177,7 +198,7 @@ impl Collection {
         for mut card in self.storage.all_searched_cards()? {
             let original = card.clone();
             card.set_new_position(card.due as u32 + by);
-            self.update_card_inner(&mut card, &original, usn)?;
+            self.update_card_inner(&mut card, original, usn)?;
         }
         self.storage.clear_searched_cards_table()?;
         Ok(())
@@ -190,22 +211,22 @@ mod test {
 
     #[test]
     fn new_order() {
-        let mut c1 = Card::new(NoteID(6), 0, DeckID(0), 0);
+        let mut c1 = Card::new(NoteId(6), 0, DeckId(0), 0);
         c1.id.0 = 2;
-        let mut c2 = Card::new(NoteID(5), 0, DeckID(0), 0);
+        let mut c2 = Card::new(NoteId(5), 0, DeckId(0), 0);
         c2.id.0 = 3;
-        let mut c3 = Card::new(NoteID(4), 0, DeckID(0), 0);
+        let mut c3 = Card::new(NoteId(4), 0, DeckId(0), 0);
         c3.id.0 = 1;
         let cards = vec![c1.clone(), c2.clone(), c3.clone()];
 
         // Preserve
-        let sorter = NewCardSorter::new(&cards, 0, 1, NewCardSortOrder::Preserve);
+        let sorter = NewCardSorter::new(&cards, 0, 1, NewCardDueOrder::Preserve);
         assert_eq!(sorter.position(&c1), 0);
         assert_eq!(sorter.position(&c2), 1);
         assert_eq!(sorter.position(&c3), 2);
 
-        // NoteID/step/starting
-        let sorter = NewCardSorter::new(&cards, 3, 2, NewCardSortOrder::NoteId);
+        // NoteId/step/starting
+        let sorter = NewCardSorter::new(&cards, 3, 2, NewCardDueOrder::NoteId);
         assert_eq!(sorter.position(&c3), 3);
         assert_eq!(sorter.position(&c2), 5);
         assert_eq!(sorter.position(&c1), 7);
@@ -213,12 +234,21 @@ mod test {
         // Random
         let mut c1_positions = HashSet::new();
         for _ in 1..100 {
-            let sorter = NewCardSorter::new(&cards, 0, 1, NewCardSortOrder::Random);
+            let sorter = NewCardSorter::new(&cards, 0, 1, NewCardDueOrder::Random);
             c1_positions.insert(sorter.position(&c1));
             if c1_positions.len() == cards.len() {
                 return;
             }
         }
         unreachable!("not random");
+    }
+}
+
+impl From<NewCardInsertOrder> for NewCardDueOrder {
+    fn from(o: NewCardInsertOrder) -> Self {
+        match o {
+            NewCardInsertOrder::Due => NewCardDueOrder::NoteId,
+            NewCardInsertOrder::Random => NewCardDueOrder::Random,
+        }
     }
 }

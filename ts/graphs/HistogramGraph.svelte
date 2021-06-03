@@ -1,13 +1,18 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
+    import AxisTicks from "./AxisTicks.svelte";
+    import NoDataOverlay from "./NoDataOverlay.svelte";
+    import CumulativeOverlay from "./CumulativeOverlay.svelte";
+    import HoverColumns from "./HoverColumns.svelte";
+
     import type { HistogramData } from "./histogram-graph";
     import { histogramGraph } from "./histogram-graph";
-    import AxisTicks from "./AxisTicks.svelte";
     import { defaultGraphBounds } from "./graph-helpers";
-    import NoDataOverlay from "./NoDataOverlay.svelte";
-    import type { I18n } from "anki/i18n";
 
     export let data: HistogramData | null = null;
-    export let i18n: I18n;
 
     let bounds = defaultGraphBounds();
     let svg = null as HTMLElement | SVGElement | null;
@@ -17,8 +22,8 @@
 
 <svg bind:this={svg} viewBox={`0 0 ${bounds.width} ${bounds.height}`}>
     <g class="bars" />
-    <g class="hoverzone" />
-    <path class="area" />
+    <HoverColumns />
+    <CumulativeOverlay />
     <AxisTicks {bounds} />
-    <NoDataOverlay {bounds} {i18n} />
+    <NoDataOverlay {bounds} />
 </svg>

@@ -1,8 +1,8 @@
 """Repo setup that can't happen until after defs.bzl:setup_deps() is run."""
 
 load("@py_deps//:requirements.bzl", "pip_install")
-load("@npm//@bazel/labs:package.bzl", "npm_bazel_labs_dependencies")
+load("@rules_rust//tools/rust_analyzer/raze:crates.bzl", "rules_rust_tools_rust_analyzer_fetch_remote_crates")
 
 def setup_late_deps():
     pip_install()
-    npm_bazel_labs_dependencies()
+    rules_rust_tools_rust_analyzer_fetch_remote_crates()

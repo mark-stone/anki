@@ -1,16 +1,23 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::err::{AnkiError, Result};
-use crate::log::{debug, Logger};
+use std::{
+    borrow::Cow,
+    fs, io,
+    io::Read,
+    path::{Path, PathBuf},
+    time,
+};
+
 use lazy_static::lazy_static;
 use regex::Regex;
 use sha1::Sha1;
-use std::borrow::Cow;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::{fs, io, time};
 use unicode_normalization::{is_nfc, UnicodeNormalization};
+
+use crate::{
+    error::{AnkiError, Result},
+    log::{debug, Logger},
+};
 
 /// The maximum length we allow a filename to be. When combined
 /// with the rest of the path, the full path needs to be under ~240 chars
@@ -122,7 +129,7 @@ pub(crate) fn normalize_nfc_filename(mut fname: Cow<str>) -> Cow<str> {
 /// On Apple devices, the filename may be stored on disk in NFD encoding,
 /// but can be accessed as NFC. On these devices, if the filename
 /// is otherwise valid, the filename is returned as NFC.
-#[allow(clippy::collapsible_if)]
+#[allow(clippy::collapsible_else_if)]
 pub(super) fn filename_if_normalized(fname: &str) -> Option<Cow<str>> {
     if cfg!(target_vendor = "apple") {
         if !is_nfc(fname) {
@@ -412,9 +419,10 @@ pub(super) fn data_for_file(media_folder: &Path, fname: &str) -> Result<Option<V
             if e.kind() == io::ErrorKind::NotFound {
                 return Ok(None);
             } else {
-                return Err(AnkiError::IOError {
-                    info: format!("unable to read {}: {}", fname, e),
-                });
+                return Err(AnkiError::IoError(format!(
+                    "unable to read {}: {}",
+                    fname, e
+                )));
             }
         }
     };
@@ -425,12 +433,14 @@ pub(super) fn data_for_file(media_folder: &Path, fname: &str) -> Result<Option<V
 
 #[cfg(test)]
 mod test {
+    use std::borrow::Cow;
+
+    use tempfile::tempdir;
+
     use crate::media::files::{
         add_data_to_folder_uniquely, add_hash_suffix_to_file_stem, normalize_filename,
         remove_files, sha1_of_data, truncate_filename, MAX_FILENAME_LENGTH,
     };
-    use std::borrow::Cow;
-    use tempfile::tempdir;
 
     #[test]
     fn normalize() {

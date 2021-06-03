@@ -1,18 +1,20 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use std::convert::TryFrom;
+
+use num_enum::TryFromPrimitive;
+use rusqlite::{params, NO_PARAMS};
+
 use super::SqliteStorage;
 use crate::{
-    card::CardID,
-    decks::DeckID,
-    err::{AnkiError, Result},
-    notes::NoteID,
+    card::CardId,
+    decks::DeckId,
+    error::{AnkiError, Result},
+    notes::NoteId,
     sync::Graves,
     types::Usn,
 };
-use num_enum::TryFromPrimitive;
-use rusqlite::{params, NO_PARAMS};
-use std::convert::TryFrom;
 
 #[derive(TryFromPrimitive)]
 #[repr(u8)]
@@ -28,27 +30,27 @@ impl SqliteStorage {
         Ok(())
     }
 
-    pub(crate) fn add_card_grave(&self, cid: CardID, usn: Usn) -> Result<()> {
+    pub(crate) fn add_card_grave(&self, cid: CardId, usn: Usn) -> Result<()> {
         self.add_grave(cid.0, GraveKind::Card, usn)
     }
 
-    pub(crate) fn add_note_grave(&self, nid: NoteID, usn: Usn) -> Result<()> {
+    pub(crate) fn add_note_grave(&self, nid: NoteId, usn: Usn) -> Result<()> {
         self.add_grave(nid.0, GraveKind::Note, usn)
     }
 
-    pub(crate) fn add_deck_grave(&self, did: DeckID, usn: Usn) -> Result<()> {
+    pub(crate) fn add_deck_grave(&self, did: DeckId, usn: Usn) -> Result<()> {
         self.add_grave(did.0, GraveKind::Deck, usn)
     }
 
-    pub(crate) fn remove_card_grave(&self, cid: CardID) -> Result<()> {
+    pub(crate) fn remove_card_grave(&self, cid: CardId) -> Result<()> {
         self.remove_grave(cid.0, GraveKind::Card)
     }
 
-    pub(crate) fn remove_note_grave(&self, nid: NoteID) -> Result<()> {
+    pub(crate) fn remove_note_grave(&self, nid: NoteId) -> Result<()> {
         self.remove_grave(nid.0, GraveKind::Note)
     }
 
-    pub(crate) fn remove_deck_grave(&self, did: DeckID) -> Result<()> {
+    pub(crate) fn remove_deck_grave(&self, did: DeckId) -> Result<()> {
         self.remove_grave(did.0, GraveKind::Deck)
     }
 
@@ -64,15 +66,14 @@ impl SqliteStorage {
             let kind = GraveKind::try_from(row.get::<_, u8>(1)?)
                 .map_err(|_| AnkiError::invalid_input("invalid grave kind"))?;
             match kind {
-                GraveKind::Card => graves.cards.push(CardID(oid)),
-                GraveKind::Note => graves.notes.push(NoteID(oid)),
-                GraveKind::Deck => graves.decks.push(DeckID(oid)),
+                GraveKind::Card => graves.cards.push(CardId(oid)),
+                GraveKind::Note => graves.notes.push(NoteId(oid)),
+                GraveKind::Deck => graves.decks.push(DeckId(oid)),
             }
         }
         Ok(graves)
     }
 
-    // fixme: graves is missing an index
     pub(crate) fn update_pending_grave_usns(&self, new_usn: Usn) -> Result<()> {
         self.db
             .prepare("update graves set usn=? where usn=-1")?

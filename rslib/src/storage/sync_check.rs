@@ -1,13 +1,14 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use rusqlite::NO_PARAMS;
+
 use super::*;
 use crate::{
-    err::SyncErrorKind,
+    error::SyncErrorKind,
     prelude::*,
     sync::{SanityCheckCounts, SanityCheckDueCounts},
 };
-use rusqlite::NO_PARAMS;
 
 impl SqliteStorage {
     fn table_has_usn(&self, table: &str) -> Result<bool> {
@@ -39,10 +40,10 @@ impl SqliteStorage {
             "notetypes",
         ] {
             if self.table_has_usn(table)? {
-                return Err(AnkiError::SyncError {
-                    info: format!("table had usn=-1: {}", table),
-                    kind: SyncErrorKind::Other,
-                });
+                return Err(AnkiError::sync_error(
+                    format!("table had usn=-1: {}", table),
+                    SyncErrorKind::Other,
+                ));
             }
         }
 

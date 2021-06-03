@@ -117,6 +117,13 @@ To run a single Python library test, eg test_bury:
 PYTEST=test_bury bazel run //pylib:pytest
 ```
 
+On Mac/Linux, after installing 'fswatch', you can run mypy on
+each file save automatically with:
+
+```
+./scripts/mypy-watch
+```
+
 ## Fixing formatting
 
 If the format tests fail, most can be fixed by running `format`
@@ -149,11 +156,11 @@ build --disk_cache=~/bazel/ankidisk --repository_cache=~/bazel/ankirepo
 ```
 
 If you're frequently modifying the Rust parts of Anki, you can place the
-following in your user.bazelrc file to enable incremental compilation:
+following in your user.bazelrc file to enable incremental compilation
+when using ./run.
 
 ```
-build --@io_bazel_rules_rust//worker:use_worker=True
-build:windows --worker_quit_after_build
+build --@rules_rust//:experimental_incremental_base=/home/myuser/bazel/incremental
 ```
 
 The worker support is experimental, so you may need to remove it in future

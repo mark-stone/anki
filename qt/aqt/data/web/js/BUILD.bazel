@@ -1,5 +1,4 @@
 load("@npm//@bazel/typescript:index.bzl", "ts_library")
-load("@npm//@bazel/rollup:index.bzl", "rollup_bundle")
 load("//ts:copy.bzl", "copy_files_into_group")
 load("//ts:prettier.bzl", "prettier_test")
 load("//ts:eslint.bzl", "eslint_test")
@@ -38,12 +37,21 @@ copy_files_into_group(
     package = "//ts/editor",
 )
 
+copy_files_into_group(
+    name = "reviewer_extras",
+    srcs = [
+        "reviewer_extras.js",
+    ],
+    package = "//ts/reviewer",
+)
+
 filegroup(
     name = "js",
     srcs = [
         "aqt_es5",
         "editor",
         "mathjax.js",
+        "reviewer_extras",
         "//qt/aqt/data/web/js/vendor",
     ],
     visibility = ["//qt:__subpackages__"],
@@ -51,7 +59,10 @@ filegroup(
 
 prettier_test(
     name = "format_check",
-    srcs = glob(["*.ts", "*.js"]),
+    srcs = glob([
+        "*.ts",
+        "*.js",
+    ]),
 )
 
 # source files need fixing first

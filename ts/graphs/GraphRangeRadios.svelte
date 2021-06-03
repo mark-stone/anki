@@ -1,9 +1,12 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
-    import type { I18n } from "anki/i18n";
     import { RevlogRange, GraphRange } from "./graph-helpers";
-    import { timeSpan, MONTH, YEAR } from "anki/time";
+    import { timeSpan, MONTH, YEAR } from "lib/time";
 
-    export let i18n: I18n;
+    import * as tr from "lib/i18n";
     export let revlogRange: RevlogRange;
     export let graphRange: GraphRange;
     export let followRevlog: boolean = false;
@@ -22,10 +25,10 @@
         onFollowRevlog(revlogRange);
     }
 
-    const month = timeSpan(i18n, 1 * MONTH);
-    const month3 = timeSpan(i18n, 3 * MONTH);
-    const year = timeSpan(i18n, 1 * YEAR);
-    const all = i18n.tr(i18n.TR.STATISTICS_RANGE_ALL_TIME);
+    const month = timeSpan(1 * MONTH);
+    const month3 = timeSpan(3 * MONTH);
+    const year = timeSpan(1 * YEAR);
+    const all = tr.statisticsRangeAllTime();
 </script>
 
 <label>

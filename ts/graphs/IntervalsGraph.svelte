@@ -1,6 +1,19 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
-    import { timeSpan, MONTH } from "anki/time";
-    import type { I18n } from "anki/i18n";
+    import { timeSpan, MONTH } from "lib/time";
+
+    import type pb from "lib/backend_proto";
+    import type { PreferenceStore } from "sveltelib/preferences";
+    import { createEventDispatcher } from "svelte";
+
+    import Graph from "./Graph.svelte";
+    import InputBox from "./InputBox.svelte";
+    import HistogramGraph from "./HistogramGraph.svelte";
+    import TableData from "./TableData.svelte";
+
     import type { HistogramData } from "./histogram-graph";
     import {
         gatherIntervalData,
@@ -8,16 +21,11 @@
         prepareIntervalData,
     } from "./intervals";
     import type { IntervalGraphData } from "./intervals";
-    import type pb from "anki/backend_proto";
-    import HistogramGraph from "./HistogramGraph.svelte";
     import type { TableDatum, SearchEventMap } from "./graph-helpers";
-    import TableData from "./TableData.svelte";
-    import { createEventDispatcher } from "svelte";
-    import type { PreferenceStore } from "./preferences";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
-    export let i18n: I18n;
-    export let preferences: PreferenceStore;
+    import * as tr from "lib/i18n";
+    export let preferences: PreferenceStore<pb.BackendProto.GraphPreferences>;
 
     const dispatch = createEventDispatcher<SearchEventMap>();
 
@@ -35,24 +43,19 @@
         [histogramData, tableData] = prepareIntervalData(
             intervalData,
             range,
-            i18n,
             dispatch,
             $browserLinksSupported
         );
     }
 
-    const title = i18n.tr(i18n.TR.STATISTICS_INTERVALS_TITLE);
-    const month = timeSpan(i18n, 1 * MONTH);
-    const all = i18n.tr(i18n.TR.STATISTICS_RANGE_ALL_TIME);
-    const subtitle = i18n.tr(i18n.TR.STATISTICS_INTERVALS_SUBTITLE);
+    const title = tr.statisticsIntervalsTitle();
+    const subtitle = tr.statisticsIntervalsSubtitle();
+    const month = timeSpan(1 * MONTH);
+    const all = tr.statisticsRangeAllTime();
 </script>
 
-<div class="graph intervals" id="graph-intervals">
-    <h1>{title}</h1>
-
-    <div class="subtitle">{subtitle}</div>
-
-    <div class="range-box-inner">
+<Graph {title} {subtitle}>
+    <InputBox>
         <label>
             <input type="radio" bind:group={range} value={IntervalRange.Month} />
             {month}
@@ -69,9 +72,9 @@
             <input type="radio" bind:group={range} value={IntervalRange.All} />
             {all}
         </label>
-    </div>
+    </InputBox>
 
-    <HistogramGraph data={histogramData} {i18n} />
+    <HistogramGraph data={histogramData} />
 
-    <TableData {i18n} {tableData} />
-</div>
+    <TableData {tableData} />
+</Graph>

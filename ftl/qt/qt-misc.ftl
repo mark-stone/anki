@@ -29,14 +29,17 @@ qt-misc-manage-note-types = Manage Note Types
 qt-misc-name-exists = Name exists.
 qt-misc-non-unicode-text = <non-unicode text>
 qt-misc-optimizing = Optimizing...
-qt-misc-please-connect-a-microphone-and-ensure = Please connect a microphone, and ensure other programs are not using the audio device.
+qt-misc-unable-to-record =
+    Unable to record. Please ensure a microphone is connected, and Anki has permission to use the microphone.
+    If other programs are using your microphone, closing them may help.
+    
+    Original error: { $error }
 qt-misc-please-ensure-a-profile-is-open = Please ensure a profile is open and Anki is not busy, then try again.
 qt-misc-please-select-1-card = (please select 1 card)
 qt-misc-please-select-a-deck = Please select a deck.
 qt-misc-please-use-fileimport-to-import-this = Please use File>Import to import this file.
 qt-misc-processing = Processing...
 qt-misc-replace-your-collection-with-an-earlier = Replace your collection with an earlier backup?
-qt-misc-resume-now = Resume Now
 qt-misc-revert-to-backup = Revert to backup
 qt-misc-reverted-to-state-prior-to = Reverted to state prior to '{ $val }'.
 qt-misc-segoe-ui = "Segoe UI"
@@ -56,7 +59,6 @@ qt-misc-unable-to-move-existing-file-to = Unable to move existing file to trash 
 qt-misc-undo = Undo
 qt-misc-undo2 = Undo { $val }
 qt-misc-unexpected-response-code = Unexpected response code: { $val }
-qt-misc-waiting-for-editing-to-finish = Waiting for editing to finish.
 qt-misc-would-you-like-to-download-it = Would you like to download it now?
 qt-misc-your-collection-file-appears-to-be = Your collection file appears to be corrupt. This can happen when the file is copied or moved while Anki is open, or when the collection is stored on a network or cloud drive. If problems persist after restarting your computer, please open an automatic backup from the profile screen.
 qt-misc-your-computers-storage-may-be-full = Your computer's storage may be full. Please delete some unneeded files, then try again.
@@ -72,3 +74,9 @@ qt-misc-second =
         [one] { $count } second
        *[other] { $count } seconds
     }
+
+## deprecated- these strings will be removed in the future, and do not need
+## to be translated
+
+qt-misc-resume-now = Resume Now
+qt-misc-waiting-for-editing-to-finish = Waiting for editing to finish.

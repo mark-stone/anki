@@ -3,6 +3,25 @@
 
 from __future__ import annotations
 
+from typing import Any, Generator, List, Literal, Optional, Sequence, Tuple, Union, cast
+
+import anki._backend.backend_pb2 as _pb
+
+# protobuf we publicly export - listed first to avoid circular imports
+SearchNode = _pb.SearchNode
+Progress = _pb.Progress
+EmptyCardsReport = _pb.EmptyCardsReport
+GraphPreferences = _pb.GraphPreferences
+Preferences = _pb.Preferences
+UndoStatus = _pb.UndoStatus
+OpChanges = _pb.OpChanges
+OpChangesWithCount = _pb.OpChangesWithCount
+OpChangesWithId = _pb.OpChangesWithId
+OpChangesAfterUndo = _pb.OpChangesAfterUndo
+DefaultsForAdding = _pb.DeckAndNotetype
+BrowserRow = _pb.BrowserRow
+BrowserColumns = _pb.BrowserColumns
+
 import copy
 import os
 import pprint
@@ -12,27 +31,23 @@ import time
 import traceback
 import weakref
 from dataclasses import dataclass, field
-from typing import Any, List, Literal, Optional, Sequence, Tuple, Union
 
-import anki._backend.backend_pb2 as _pb
-import anki.find
-import anki.latex  # sets up hook
-import anki.template
+import anki.latex
 from anki import hooks
-from anki._backend import RustBackend
-from anki.cards import Card
-from anki.config import ConfigManager
+from anki._backend import RustBackend, Translations
+from anki.cards import Card, CardId
+from anki.config import Config, ConfigManager
 from anki.consts import *
 from anki.dbproxy import DBProxy
-from anki.decks import DeckManager
-from anki.errors import AnkiError, DBError
-from anki.lang import TR, FormatTimeSpan
+from anki.decks import DeckId, DeckManager
+from anki.errors import AbortSchemaModification, DBError
+from anki.lang import FormatTimeSpan
 from anki.media import MediaManager, media_paths_from_col_path
-from anki.models import ModelManager, NoteType
-from anki.notes import Note
-from anki.sched import Scheduler as V1Scheduler
-from anki.scheduler import Scheduler as V2TestScheduler
-from anki.schedv2 import Scheduler as V2Scheduler
+from anki.models import ModelManager, NotetypeDict, NotetypeId
+from anki.notes import Note, NoteId
+from anki.scheduler.v1 import Scheduler as V1Scheduler
+from anki.scheduler.v2 import Scheduler as V2Scheduler
+from anki.scheduler.v3 import Scheduler as V3Scheduler
 from anki.sync import SyncAuth, SyncOutput, SyncStatus
 from anki.tags import TagManager
 from anki.types import assert_exhaustive
@@ -43,39 +58,31 @@ from anki.utils import (
     intTime,
     splitFields,
     stripHTMLMedia,
+    to_json_bytes,
 )
 
-# public exports
-SearchNode = _pb.SearchNode
+anki.latex.setup_hook()
+
+
 SearchJoiner = Literal["AND", "OR"]
-Progress = _pb.Progress
-Config = _pb.Config
-EmptyCardsReport = _pb.EmptyCardsReport
-GraphPreferences = _pb.GraphPreferences
-BuiltinSort = _pb.SortOrder.Builtin
-Preferences = _pb.Preferences
-UndoStatus = _pb.UndoStatus
-DefaultsForAdding = _pb.DeckAndNotetype
 
 
 @dataclass
-class ReviewUndo:
+class LegacyReviewUndo:
     card: Card
     was_leech: bool
 
 
 @dataclass
-class Checkpoint:
+class LegacyCheckpoint:
     name: str
 
 
-@dataclass
-class BackendUndo:
-    name: str
+LegacyUndoResult = Union[None, LegacyCheckpoint, LegacyReviewUndo]
 
 
 class Collection:
-    sched: Union[V1Scheduler, V2Scheduler]
+    sched: Union[V1Scheduler, V2Scheduler, V3Scheduler]
 
     def __init__(
         self,
@@ -91,6 +98,7 @@ class Collection:
         self.path = os.path.abspath(path)
         self.reopen()
 
+        self.tr = Translations(weakref.ref(self._backend))
         self.media = MediaManager(self, server)
         self.models = ModelManager(self)
         self.decks = DeckManager(self)
@@ -117,9 +125,6 @@ class Collection:
     # I18n/messages
     ##########################################################################
 
-    def tr(self, key: TR.V, **kwargs: Union[str, int, float]) -> str:
-        return self._backend.translate(key, **kwargs)
-
     def format_timespan(
         self,
         seconds: float,
@@ -136,9 +141,10 @@ class Collection:
     # Scheduler
     ##########################################################################
 
+    # for backwards compatibility, v3 is represented as 2
     supportedSchedulerVersions = (1, 2)
 
-    def schedVer(self) -> Any:
+    def schedVer(self) -> Literal[1, 2]:
         ver = self.conf.get("schedVer", 1)
         if ver in self.supportedSchedulerVersions:
             return ver
@@ -150,8 +156,8 @@ class Collection:
         if ver == 1:
             self.sched = V1Scheduler(self)
         elif ver == 2:
-            if self.is_2021_test_scheduler_enabled():
-                self.sched = V2TestScheduler(self)  # type: ignore
+            if self.v3_scheduler():
+                self.sched = V3Scheduler(self)
             else:
                 self.sched = V2Scheduler(self)
 
@@ -160,11 +166,13 @@ class Collection:
         self.clear_python_undo()
         self._loadScheduler()
 
-    def is_2021_test_scheduler_enabled(self) -> bool:
+    def v3_scheduler(self) -> bool:
         return self.get_config_bool(Config.Bool.SCHED_2021)
 
-    def set_2021_test_scheduler_enabled(self, enabled: bool) -> None:
-        if self.is_2021_test_scheduler_enabled() != enabled:
+    def set_v3_scheduler(self, enabled: bool) -> None:
+        if self.v3_scheduler() != enabled:
+            if enabled and self.schedVer() != 2:
+                raise Exception("must upgrade to v2 scheduler first")
             self.set_config_bool(Config.Bool.SCHED_2021, enabled)
             self._loadScheduler()
 
@@ -193,23 +201,17 @@ class Collection:
 
     flush = setMod
 
-    def modified_after_begin(self) -> bool:
+    def modified_by_backend(self) -> bool:
         # Until we can move away from long-running transactions, the Python
-        # code needs to know if transaction should be committed, so we need
+        # code needs to know if the transaction should be committed, so we need
         # to check if the backend updated the modification time.
         return self.db.last_begin_at != self.mod
 
     def save(self, name: Optional[str] = None, trx: bool = True) -> None:
         "Flush, commit DB, and take out another write lock if trx=True."
         # commit needed?
-        if self.db.modified_in_python or self.modified_after_begin():
-            if self.db.modified_in_python:
-                self.db.execute("update col set mod = ?", intTime(1000))
-                self.db.modified_in_python = False
-            else:
-                # modifications made by the backend will have already bumped
-                # mtime
-                pass
+        if self.db.modified_in_python or self.modified_by_backend():
+            self.db.modified_in_python = False
             self.db.commit()
             if trx:
                 self.db.begin()
@@ -292,8 +294,8 @@ class Collection:
         "Mark schema modified. Call this first so user can abort if necessary."
         if not self.schemaChanged():
             if check and not hooks.schema_will_change(proceed=True):
-                raise AnkiError("abortSchemaMod")
-        self.scm = intTime(1000)
+                raise AbortSchemaModification()
+        self.db.execute("update col set scm=?", intTime(1000))
         self.save()
 
     def schemaChanged(self) -> bool:
@@ -312,10 +314,10 @@ class Collection:
         self._backend.before_upload()
         self.close(save=False, downgrade=True)
 
-    # Object creation helpers
+    # Object helpers
     ##########################################################################
 
-    def get_card(self, id: int) -> Card:
+    def get_card(self, id: CardId) -> Card:
         return Card(self, id)
 
     def update_card(self, card: Card) -> None:
@@ -323,13 +325,15 @@ class Collection:
         Unlike card.flush(), this will invalidate any current checkpoint."""
         self._backend.update_card(card=card._to_backend_card(), skip_undo_entry=False)
 
-    def get_note(self, id: int) -> Note:
+    def get_note(self, id: NoteId) -> Note:
         return Note(self, id=id)
 
-    def update_note(self, note: Note) -> None:
+    def update_note(self, note: Note) -> OpChanges:
         """Save note changes to database, and add an undo entry.
         Unlike note.flush(), this will invalidate any current checkpoint."""
-        self._backend.update_note(note=note._to_backend_note(), skip_undo_entry=False)
+        return self._backend.update_note(
+            note=note._to_backend_note(), skip_undo_entry=False
+        )
 
     getCard = get_card
     getNote = get_note
@@ -352,7 +356,7 @@ class Collection:
     # Deletion logging
     ##########################################################################
 
-    def _logRem(self, ids: List[int], type: int) -> None:
+    def _logRem(self, ids: List[Union[int, NoteId]], type: int) -> None:
         self.db.executemany(
             "insert into graves values (%d, ?, %d)" % (self.usn(), type),
             ([x] for x in ids),
@@ -361,17 +365,19 @@ class Collection:
     # Notes
     ##########################################################################
 
-    def new_note(self, notetype: NoteType) -> Note:
+    def new_note(self, notetype: NotetypeDict) -> Note:
         return Note(self, notetype)
 
-    def add_note(self, note: Note, deck_id: int) -> None:
-        note.id = self._backend.add_note(note=note._to_backend_note(), deck_id=deck_id)
+    def add_note(self, note: Note, deck_id: DeckId) -> OpChanges:
+        out = self._backend.add_note(note=note._to_backend_note(), deck_id=deck_id)
+        note.id = NoteId(out.note_id)
+        return out.changes
 
-    def remove_notes(self, note_ids: Sequence[int]) -> None:
+    def remove_notes(self, note_ids: Sequence[NoteId]) -> OpChangesWithCount:
         hooks.notes_will_be_deleted(self, note_ids)
-        self._backend.remove_notes(note_ids=note_ids, card_ids=[])
+        return self._backend.remove_notes(note_ids=note_ids, card_ids=[])
 
-    def remove_notes_by_card(self, card_ids: List[int]) -> None:
+    def remove_notes_by_card(self, card_ids: List[CardId]) -> None:
         if hooks.notes_will_be_deleted.count():
             nids = self.db.list(
                 f"select nid from cards where id in {ids2str(card_ids)}"
@@ -379,8 +385,8 @@ class Collection:
             hooks.notes_will_be_deleted(self, nids)
         self._backend.remove_notes(note_ids=[], card_ids=card_ids)
 
-    def card_ids_of_note(self, note_id: int) -> Sequence[int]:
-        return self._backend.cards_of_note(note_id)
+    def card_ids_of_note(self, note_id: NoteId) -> Sequence[CardId]:
+        return [CardId(id) for id in self._backend.cards_of_note(note_id)]
 
     def defaults_for_adding(
         self, *, current_review_card: Optional[Card]
@@ -390,23 +396,25 @@ class Collection:
         or current notetype.
         """
         if card := current_review_card:
-            home_deck = card.odid or card.did
+            home_deck = card.current_deck_id()
         else:
-            home_deck = 0
+            home_deck = DeckId(0)
 
         return self._backend.defaults_for_adding(
             home_deck_of_current_review_card=home_deck,
         )
 
-    def default_deck_for_notetype(self, notetype_id: int) -> Optional[int]:
+    def default_deck_for_notetype(self, notetype_id: NotetypeId) -> Optional[DeckId]:
         """If 'change deck depending on notetype' is enabled in the preferences,
         return the last deck used with the provided notetype, if any.."""
         if self.get_config_bool(Config.Bool.ADDING_DEFAULTS_TO_CURRENT_DECK):
             return None
 
         return (
-            self._backend.default_deck_for_notetype(
-                ntid=notetype_id,
+            DeckId(
+                self._backend.default_deck_for_notetype(
+                    ntid=notetype_id,
+                )
             )
             or None
         )
@@ -424,10 +432,10 @@ class Collection:
         self.add_note(note, note.model()["did"])
         return len(note.cards())
 
-    def remNotes(self, ids: Sequence[int]) -> None:
+    def remNotes(self, ids: Sequence[NoteId]) -> None:
         self.remove_notes(ids)
 
-    def _remNotes(self, ids: List[int]) -> None:
+    def _remNotes(self, ids: List[NoteId]) -> None:
         pass
 
     # Cards
@@ -439,22 +447,22 @@ class Collection:
     def cardCount(self) -> Any:
         return self.db.scalar("select count() from cards")
 
-    def remove_cards_and_orphaned_notes(self, card_ids: Sequence[int]) -> None:
+    def remove_cards_and_orphaned_notes(self, card_ids: Sequence[CardId]) -> None:
         "You probably want .remove_notes_by_card() instead."
         self._backend.remove_cards(card_ids=card_ids)
 
-    def set_deck(self, card_ids: List[int], deck_id: int) -> None:
-        self._backend.set_deck(card_ids=card_ids, deck_id=deck_id)
+    def set_deck(self, card_ids: Sequence[CardId], deck_id: int) -> OpChangesWithCount:
+        return self._backend.set_deck(card_ids=card_ids, deck_id=deck_id)
 
     def get_empty_cards(self) -> EmptyCardsReport:
         return self._backend.get_empty_cards()
 
     # legacy
 
-    def remCards(self, ids: List[int], notes: bool = True) -> None:
+    def remCards(self, ids: List[CardId], notes: bool = True) -> None:
         self.remove_cards_and_orphaned_notes(ids)
 
-    def emptyCids(self) -> List[int]:
+    def emptyCids(self) -> List[CardId]:
         print("emptyCids() will go away")
         return []
 
@@ -462,7 +470,7 @@ class Collection:
     ##########################################################################
 
     def after_note_updates(
-        self, nids: List[int], mark_modified: bool, generate_cards: bool = True
+        self, nids: List[NoteId], mark_modified: bool, generate_cards: bool = True
     ) -> None:
         self._backend.after_note_updates(
             nids=nids, generate_cards=generate_cards, mark_notes_modified=mark_modified
@@ -470,11 +478,11 @@ class Collection:
 
     # legacy
 
-    def updateFieldCache(self, nids: List[int]) -> None:
+    def updateFieldCache(self, nids: List[NoteId]) -> None:
         self.after_note_updates(nids, mark_modified=False, generate_cards=False)
 
     # this also updates field cache
-    def genCards(self, nids: List[int]) -> List[int]:
+    def genCards(self, nids: List[NoteId]) -> List[int]:
         self.after_note_updates(nids, mark_modified=False, generate_cards=True)
         # previously returned empty cards, no longer does
         return []
@@ -485,9 +493,9 @@ class Collection:
     def find_cards(
         self,
         query: str,
-        order: Union[bool, str, BuiltinSort.Kind.V] = False,
+        order: Union[bool, str, BrowserColumns.Column] = False,
         reverse: bool = False,
-    ) -> Sequence[int]:
+    ) -> Sequence[CardId]:
         """Return card ids matching the provided search.
 
         To programmatically construct a search string, see .build_search_string().
@@ -500,58 +508,99 @@ class Collection:
         desc and vice versa when reverse is set in the collection config, eg
         order="c.ivl asc, c.due desc".
 
-        If order is a BuiltinSort.Kind value, sort using that builtin sort, eg
-        col.find_cards("", order=BuiltinSort.Kind.CARD_DUE)
+        If order is a BrowserColumns.Column that supports sorting, sort using that
+        column. All available columns are available through col.all_browser_columns()
+        or browser.table._model.columns and support sorting unless column.sorting
+        is set to BrowserColumns.SORTING_NONE.
 
-        The reverse argument only applies when a BuiltinSort.Kind is provided;
+        The reverse argument only applies when a BrowserColumns.Column is provided;
         otherwise the collection config defines whether reverse is set or not.
         """
-        if isinstance(order, str):
-            mode = _pb.SortOrder(custom=order)
-        elif isinstance(order, bool):
-            if order is True:
-                mode = _pb.SortOrder(from_config=_pb.Empty())
-            else:
-                mode = _pb.SortOrder(none=_pb.Empty())
-        else:
-            mode = _pb.SortOrder(
-                builtin=_pb.SortOrder.Builtin(kind=order, reverse=reverse)
-            )
-        return self._backend.search_cards(search=query, order=mode)
+        mode = self._build_sort_mode(order, reverse, False)
+        return cast(
+            Sequence[CardId], self._backend.search_cards(search=query, order=mode)
+        )
 
-    def find_notes(self, *terms: Union[str, SearchNode]) -> Sequence[int]:
-        """Return note ids matching the provided search or searches.
+    def find_notes(
+        self,
+        query: str,
+        order: Union[bool, str, BrowserColumns.Column] = False,
+        reverse: bool = False,
+    ) -> Sequence[NoteId]:
+        """Return note ids matching the provided search.
 
-        If more than one search is provided, they will be ANDed together.
-
-        Eg: col.find_notes("test", "another") will search for "test AND another"
-        and return matching note ids.
-
-        Eg: col.find_notes(SearchNode(deck="test"), "foo") will return notes
-        that have a card in deck called "test", and have the text "foo".
+        To programmatically construct a search string, see .build_search_string().
+        The order parameter is documented in .find_cards().
         """
-        return self._backend.search_notes(self.build_search_string(*terms))
+        mode = self._build_sort_mode(order, reverse, True)
+        return cast(
+            Sequence[NoteId], self._backend.search_notes(search=query, order=mode)
+        )
+
+    def _build_sort_mode(
+        self,
+        order: Union[bool, str, BrowserColumns.Column],
+        reverse: bool,
+        finding_notes: bool,
+    ) -> _pb.SortOrder:
+        if isinstance(order, str):
+            return _pb.SortOrder(custom=order)
+        if isinstance(order, bool):
+            if order is False:
+                return _pb.SortOrder(none=_pb.Empty())
+            # order=True: set args to sort column and reverse from config
+            sort_key = "noteSortType" if finding_notes else "sortType"
+            order = self.get_browser_column(self.get_config(sort_key))
+            reverse_key = (
+                Config.Bool.BROWSER_NOTE_SORT_BACKWARDS
+                if finding_notes
+                else Config.Bool.BROWSER_SORT_BACKWARDS
+            )
+            reverse = self.get_config_bool(reverse_key)
+        if isinstance(order, BrowserColumns.Column):
+            if order.sorting != BrowserColumns.SORTING_NONE:
+                return _pb.SortOrder(
+                    builtin=_pb.SortOrder.Builtin(column=order.key, reverse=reverse)
+                )
+
+        # eg, user is ordering on an add-on field with the add-on not installed
+        print(f"{order} is not a valid sort order.")
+        return _pb.SortOrder(none=_pb.Empty())
 
     def find_and_replace(
         self,
-        nids: List[int],
-        src: str,
-        dst: str,
-        regex: Optional[bool] = None,
-        field: Optional[str] = None,
-        fold: bool = True,
-    ) -> int:
-        return anki.find.findReplace(self, nids, src, dst, regex, field, fold)
+        *,
+        note_ids: Sequence[NoteId],
+        search: str,
+        replacement: str,
+        regex: bool = False,
+        field_name: Optional[str] = None,
+        match_case: bool = False,
+    ) -> OpChangesWithCount:
+        "Find and replace fields in a note. Returns changed note count."
+        return self._backend.find_and_replace(
+            nids=note_ids,
+            search=search,
+            replacement=replacement,
+            regex=regex,
+            match_case=match_case,
+            field_name=field_name or "",
+        )
+
+    def field_names_for_note_ids(self, nids: Sequence[int]) -> Sequence[str]:
+        return self._backend.field_names_for_notes(nids)
 
     # returns array of ("dupestr", [nids])
-    def findDupes(self, fieldName: str, search: str = "") -> List[Tuple[Any, list]]:
-        nids = self.findNotes(search, SearchNode(field_name=fieldName))
+    def findDupes(self, fieldName: str, search: str = "") -> List[Tuple[str, list]]:
+        nids = self.find_notes(
+            self.build_search_string(search, SearchNode(field_name=fieldName))
+        )
         # go through notes
         vals: Dict[str, List[int]] = {}
         dupes = []
         fields: Dict[int, int] = {}
 
-        def ordForMid(mid: int) -> int:
+        def ordForMid(mid: NotetypeId) -> int:
             if mid not in fields:
                 model = self.models.get(mid)
                 for c, f in enumerate(model["flds"]):
@@ -664,6 +713,53 @@ class Collection:
         else:
             return SearchNode.Group.Joiner.OR
 
+    # Browser Table
+    ##########################################################################
+
+    def all_browser_columns(self) -> Sequence[BrowserColumns.Column]:
+        return self._backend.all_browser_columns()
+
+    def get_browser_column(self, key: str) -> Optional[BrowserColumns.Column]:
+        for column in self._backend.all_browser_columns():
+            if column.key == key:
+                return column
+        return None
+
+    def browser_row_for_id(
+        self, id_: int
+    ) -> Tuple[Generator[Tuple[str, bool], None, None], BrowserRow.Color.V, str, int]:
+        row = self._backend.browser_row_for_id(id_)
+        return (
+            ((cell.text, cell.is_rtl) for cell in row.cells),
+            row.color,
+            row.font_name,
+            row.font_size,
+        )
+
+    def load_browser_card_columns(self) -> List[str]:
+        """Return the stored card column names and ensure the backend columns are set and in sync."""
+        columns = self.get_config(
+            "activeCols", ["noteFld", "template", "cardDue", "deck"]
+        )
+        self._backend.set_active_browser_columns(columns)
+        return columns
+
+    def set_browser_card_columns(self, columns: List[str]) -> None:
+        self.set_config("activeCols", columns)
+        self._backend.set_active_browser_columns(columns)
+
+    def load_browser_note_columns(self) -> List[str]:
+        """Return the stored note column names and ensure the backend columns are set and in sync."""
+        columns = self.get_config(
+            "activeNoteCols", ["noteFld", "note", "noteCards", "noteTags"]
+        )
+        self._backend.set_active_browser_columns(columns)
+        return columns
+
+    def set_browser_note_columns(self, columns: List[str]) -> None:
+        self.set_config("activeNoteCols", columns)
+        self._backend.set_active_browser_columns(columns)
+
     # Config
     ##########################################################################
 
@@ -673,11 +769,20 @@ class Collection:
         except KeyError:
             return default
 
-    def set_config(self, key: str, val: Any) -> None:
-        self.conf.set(key, val)
+    def set_config(self, key: str, val: Any, *, undoable: bool = False) -> OpChanges:
+        """Set a single config variable to any JSON-serializable value. The config
+        is currently sent on every sync, so please don't store more than a few
+        kilobytes in it.
 
-    def remove_config(self, key: str) -> None:
-        self.conf.remove(key)
+        By default, no undo entry will be created, but the existing undo history
+        will be preserved. Set `undoable=True` to allow the change to be undone;
+        see undo code for how you can merge multiple undo entries."""
+        return self._backend.set_config_json(
+            key=key, value_json=to_json_bytes(val), undoable=undoable
+        )
+
+    def remove_config(self, key: str) -> OpChanges:
+        return self.conf.remove(key)
 
     def all_config(self) -> Dict[str, Any]:
         "This is a debugging aid. Prefer .get_config() when you know the key you need."
@@ -686,14 +791,52 @@ class Collection:
     def get_config_bool(self, key: Config.Bool.Key.V) -> bool:
         return self._backend.get_config_bool(key)
 
-    def set_config_bool(self, key: Config.Bool.Key.V, value: bool) -> None:
-        self._backend.set_config_bool(key=key, value=value)
+    def set_config_bool(
+        self, key: Config.Bool.Key.V, value: bool, *, undoable: bool = False
+    ) -> OpChanges:
+        return self._backend.set_config_bool(key=key, value=value, undoable=undoable)
 
     def get_config_string(self, key: Config.String.Key.V) -> str:
         return self._backend.get_config_string(key)
 
-    def set_config_string(self, key: Config.String.Key.V, value: str) -> None:
-        self._backend.set_config_string(key=key, value=value)
+    def set_config_string(
+        self, key: Config.String.Key.V, value: str, undoable: bool = False
+    ) -> OpChanges:
+        return self._backend.set_config_string(key=key, value=value, undoable=undoable)
+
+    def get_aux_notetype_config(
+        self, id: NotetypeId, key: str, default: Any = None
+    ) -> Any:
+        key = self._backend.get_aux_notetype_config_key(id=id, key=key)
+        return self.get_config(key, default=default)
+
+    def set_aux_notetype_config(
+        self, id: NotetypeId, key: str, value: Any, *, undoable: bool = False
+    ) -> OpChanges:
+        key = self._backend.get_aux_notetype_config_key(id=id, key=key)
+        return self.set_config(key, value, undoable=undoable)
+
+    def get_aux_template_config(
+        self, id: NotetypeId, card_ordinal: int, key: str, default: Any = None
+    ) -> Any:
+        key = self._backend.get_aux_template_config_key(
+            notetype_id=id, card_ordinal=card_ordinal, key=key
+        )
+        return self.get_config(key, default=default)
+
+    def set_aux_template_config(
+        self,
+        id: NotetypeId,
+        card_ordinal: int,
+        key: str,
+        value: Any,
+        *,
+        undoable: bool = False,
+    ) -> OpChanges:
+        key = self._backend.get_aux_template_config_key(
+            notetype_id=id, card_ordinal=card_ordinal, key=key
+        )
+        return self.set_config(key, value, undoable=undoable)
 
     # Stats
     ##########################################################################
@@ -703,7 +846,7 @@ class Collection:
 
         return CollectionStats(self)
 
-    def card_stats(self, card_id: int, include_revlog: bool) -> str:
+    def card_stats(self, card_id: CardId, include_revlog: bool) -> str:
         import anki.stats as st
 
         if include_revlog:
@@ -770,7 +913,7 @@ table.review-log {{ {revlog_style} }}
     ##########################################################################
 
     def undo_status(self) -> UndoStatus:
-        "Return the undo status. At the moment, redo is not supported."
+        "Return the undo status."
         # check backend first
         if status := self._check_backend_undo_status():
             return status
@@ -779,14 +922,34 @@ table.review-log {{ {revlog_style} }}
             return UndoStatus()
 
         if isinstance(self._undo, _ReviewsUndo):
-            return UndoStatus(undo=self.tr(TR.SCHEDULING_REVIEW))
-        elif isinstance(self._undo, Checkpoint):
+            return UndoStatus(undo=self.tr.scheduling_review())
+        elif isinstance(self._undo, LegacyCheckpoint):
             return UndoStatus(undo=self._undo.name)
         else:
             assert_exhaustive(self._undo)
             assert False
 
-        return status
+    def add_custom_undo_entry(self, name: str) -> int:
+        """Add an empty undo entry with the given name.
+        The return value can be used to merge subsequent changes
+        with `merge_undo_entries()`.
+
+        You should only use this with your own custom actions - when
+        extending default Anki behaviour, you should merge into an
+        existing undo entry instead, so the existing undo name is
+        preserved, and changes are processed correctly.
+        """
+        return self._backend.add_custom_undo_entry(name)
+
+    def merge_undo_entries(self, target: int) -> OpChanges:
+        """Combine multiple undoable operations into one.
+
+        After a standard Anki action, you can use col.undo_status().last_step
+        to retrieve the target to merge into. When defining your own custom
+        actions, you can use `add_custom_undo_entry()` to define a custom
+        undo name.
+        """
+        return self._backend.merge_undo_entries(target)
 
     def clear_python_undo(self) -> None:
         """Clear the Python undo state.
@@ -795,25 +958,41 @@ table.review-log {{ {revlog_style} }}
         is run."""
         self._undo = None
 
-    def undo(self) -> Union[None, BackendUndo, Checkpoint, ReviewUndo]:
-        """Returns ReviewUndo if undoing a v1/v2 scheduler review.
-        Returns None if the undo queue was empty."""
-        # backend?
-        status = self._backend.get_undo_status()
-        if status.undo:
-            self._backend.undo()
-            self.clear_python_undo()
-            return BackendUndo(name=status.undo)
+    def undo(self) -> OpChangesAfterUndo:
+        """Returns result of backend undo operation, or throws UndoEmpty.
+        If UndoEmpty is received, caller should try undo_legacy()."""
+        out = self._backend.undo()
+        self.clear_python_undo()
+        if out.changes.notetype:
+            self.models._clear_cache()
+        return out
 
+    def redo(self) -> OpChangesAfterUndo:
+        """Returns result of backend redo operation, or throws UndoEmpty."""
+        out = self._backend.redo()
+        self.clear_python_undo()
+        if out.changes.notetype:
+            self.models._clear_cache()
+        return out
+
+    def undo_legacy(self) -> LegacyUndoResult:
+        "Returns None if the legacy undo queue is empty."
         if isinstance(self._undo, _ReviewsUndo):
             return self._undo_review()
-        elif isinstance(self._undo, Checkpoint):
+        elif isinstance(self._undo, LegacyCheckpoint):
             return self._undo_checkpoint()
         elif self._undo is None:
             return None
         else:
             assert_exhaustive(self._undo)
             assert False
+
+    def op_made_changes(self, changes: OpChanges) -> bool:
+        for field in changes.DESCRIPTOR.fields:
+            if field.name != "kind":
+                if getattr(changes, field.name, False):
+                    return True
+        return False
 
     def _check_backend_undo_status(self) -> Optional[UndoStatus]:
         """Return undo status if undo available on backend.
@@ -831,15 +1010,15 @@ table.review-log {{ {revlog_style} }}
             self._undo = _ReviewsUndo()
 
         was_leech = card.note().has_tag("leech")
-        entry = ReviewUndo(card=copy.copy(card), was_leech=was_leech)
+        entry = LegacyReviewUndo(card=copy.copy(card), was_leech=was_leech)
         self._undo.entries.append(entry)
 
     def _have_outstanding_checkpoint(self) -> bool:
         self._check_backend_undo_status()
-        return isinstance(self._undo, Checkpoint)
+        return isinstance(self._undo, LegacyCheckpoint)
 
-    def _undo_checkpoint(self) -> Checkpoint:
-        assert isinstance(self._undo, Checkpoint)
+    def _undo_checkpoint(self) -> LegacyCheckpoint:
+        assert isinstance(self._undo, LegacyCheckpoint)
         self.rollback()
         undo = self._undo
         self.clear_python_undo()
@@ -849,13 +1028,13 @@ table.review-log {{ {revlog_style} }}
         "Call via .save(). If name not provided, clear any existing checkpoint."
         self._last_checkpoint_at = time.time()
         if name:
-            self._undo = Checkpoint(name=name)
+            self._undo = LegacyCheckpoint(name=name)
         else:
             # saving disables old checkpoint, but not review undo
             if not isinstance(self._undo, _ReviewsUndo):
                 self.clear_python_undo()
 
-    def _undo_review(self) -> ReviewUndo:
+    def _undo_review(self) -> LegacyReviewUndo:
         "Undo a v1/v2 review."
         assert isinstance(self._undo, _ReviewsUndo)
         entry = self._undo.entries.pop()
@@ -926,7 +1105,7 @@ table.review-log {{ {revlog_style} }}
         try:
             problems = list(self._backend.check_database())
             ok = not problems
-            problems.append(self.tr(TR.DATABASE_CHECK_REBUILT))
+            problems.append(self.tr.database_check_rebuilt())
         except DBError as e:
             problems = [str(e.args[0])]
             ok = False
@@ -984,27 +1163,18 @@ table.review-log {{ {revlog_style} }}
         self._logHnd.close()
         self._logHnd = None
 
-    # Card Flags
     ##########################################################################
 
-    def set_user_flag_for_cards(self, flag: int, cids: List[int]) -> None:
-        assert 0 <= flag <= 7
-        self.db.execute(
-            "update cards set flags = (flags & ~?) | ?, usn=?, mod=? where id in %s"
-            % ids2str(cids),
-            0b111,
-            flag,
-            self.usn(),
-            intTime(),
-        )
-
-    ##########################################################################
+    def set_user_flag_for_cards(
+        self, flag: int, cids: Sequence[CardId]
+    ) -> OpChangesWithCount:
+        return self._backend.set_flag(card_ids=cids, flag=flag)
 
     def set_wants_abort(self) -> None:
         self._backend.set_wants_abort()
 
-    def i18n_resources(self) -> bytes:
-        return self._backend.i18n_resources()
+    def i18n_resources(self, modules: Sequence[str]) -> bytes:
+        return self._backend.i18n_resources(modules=modules)
 
     def abort_media_sync(self) -> None:
         self._backend.abort_media_sync()
@@ -1047,7 +1217,7 @@ _Collection = Collection
 
 @dataclass
 class _ReviewsUndo:
-    entries: List[ReviewUndo] = field(default_factory=list)
+    entries: List[LegacyReviewUndo] = field(default_factory=list)
 
 
-_UndoInfo = Union[_ReviewsUndo, Checkpoint, None]
+_UndoInfo = Union[_ReviewsUndo, LegacyCheckpoint, None]

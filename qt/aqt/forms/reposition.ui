@@ -6,12 +6,12 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>272</width>
+    <width>299</width>
     <height>229</height>
    </rect>
   </property>
   <property name="windowTitle">
-   <string>BROWSING_REPOSITION_NEW_CARDS</string>
+   <string>browsing_reposition_new_cards</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
@@ -26,17 +26,17 @@
      <item row="0" column="0">
       <widget class="QLabel" name="label_2">
        <property name="text">
-        <string>BROWSING_START_POSITION</string>
+        <string>browsing_start_position</string>
        </property>
       </widget>
      </item>
      <item row="0" column="1">
       <widget class="QSpinBox" name="start">
        <property name="minimum">
-        <number>-20000000</number>
+        <number>0</number>
        </property>
        <property name="maximum">
-        <number>200000000</number>
+        <number>1000000</number>
        </property>
        <property name="value">
         <number>0</number>
@@ -46,7 +46,7 @@
      <item row="1" column="0">
       <widget class="QLabel" name="label_3">
        <property name="text">
-        <string>BROWSING_STEP</string>
+        <string>browsing_step</string>
        </property>
       </widget>
      </item>
@@ -65,14 +65,14 @@
    <item>
     <widget class="QCheckBox" name="randomize">
      <property name="text">
-      <string>BROWSING_RANDOMIZE_ORDER</string>
+      <string>browsing_randomize_order</string>
      </property>
     </widget>
    </item>
    <item>
     <widget class="QCheckBox" name="shift">
      <property name="text">
-      <string>BROWSING_SHIFT_POSITION_OF_EXISTING_CARDS</string>
+      <string>browsing_shift_position_of_existing_cards</string>
      </property>
      <property name="checked">
       <bool>false</bool>

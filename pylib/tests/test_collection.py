@@ -1,3 +1,6 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 # coding: utf-8
 
 import os
@@ -151,11 +154,11 @@ def test_translate():
     no_uni = without_unicode_isolation
 
     assert (
-        col.tr(TR.CARD_TEMPLATE_RENDERING_FRONT_SIDE_PROBLEM)
+        col.tr.card_template_rendering_front_side_problem()
         == "Front template has a problem:"
     )
-    assert no_uni(col.tr(TR.STATISTICS_REVIEWS, reviews=1)) == "1 review"
-    assert no_uni(col.tr(TR.STATISTICS_REVIEWS, reviews=2)) == "2 reviews"
+    assert no_uni(col.tr.statistics_reviews(reviews=1)) == "1 review"
+    assert no_uni(col.tr.statistics_reviews(reviews=2)) == "2 reviews"
 
 
 def test_db_named_args(capsys):

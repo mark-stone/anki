@@ -1,14 +1,22 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
-    import { defaultGraphBounds, RevlogRange, GraphRange } from "./graph-helpers";
+    import type pb from "lib/backend_proto";
+
+    import Graph from "./Graph.svelte";
+    import InputBox from "./InputBox.svelte";
     import AxisTicks from "./AxisTicks.svelte";
-    import { renderHours } from "./hours";
-    import type pb from "anki/backend_proto";
-    import type { I18n } from "anki/i18n";
     import NoDataOverlay from "./NoDataOverlay.svelte";
     import GraphRangeRadios from "./GraphRangeRadios.svelte";
+    import CumulativeOverlay from "./CumulativeOverlay.svelte";
+    import HoverColumns from "./HoverColumns.svelte";
+    import { defaultGraphBounds, RevlogRange, GraphRange } from "./graph-helpers";
+    import { renderHours } from "./hours";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
-    export let i18n: I18n;
+    import * as tr from "lib/i18n";
     export let revlogRange: RevlogRange;
     let graphRange: GraphRange = GraphRange.Year;
 
@@ -17,27 +25,23 @@
     let svg = null as HTMLElement | SVGElement | null;
 
     $: if (sourceData) {
-        renderHours(svg as SVGElement, bounds, sourceData, i18n, graphRange);
+        renderHours(svg as SVGElement, bounds, sourceData, graphRange);
     }
 
-    const title = i18n.tr(i18n.TR.STATISTICS_HOURS_TITLE);
-    const subtitle = i18n.tr(i18n.TR.STATISTICS_HOURS_SUBTITLE);
+    const title = tr.statisticsHoursTitle();
+    const subtitle = tr.statisticsHoursSubtitle();
 </script>
 
-<div class="graph" id="graph-hour">
-    <h1>{title}</h1>
-
-    <div class="subtitle">{subtitle}</div>
-
-    <div class="range-box-inner">
-        <GraphRangeRadios bind:graphRange {i18n} {revlogRange} followRevlog={true} />
-    </div>
+<Graph {title} {subtitle}>
+    <InputBox>
+        <GraphRangeRadios bind:graphRange {revlogRange} followRevlog={true} />
+    </InputBox>
 
     <svg bind:this={svg} viewBox={`0 0 ${bounds.width} ${bounds.height}`}>
         <g class="bars" />
-        <path class="area" />
-        <g class="hoverzone" />
+        <CumulativeOverlay />
+        <HoverColumns />
         <AxisTicks {bounds} />
-        <NoDataOverlay {bounds} {i18n} />
+        <NoDataOverlay {bounds} />
     </svg>
-</div>
+</Graph>

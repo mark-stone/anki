@@ -8,13 +8,13 @@ pub(crate) mod schema11;
 mod string;
 pub(crate) mod undo;
 
-pub use self::{bool::BoolKey, string::StringKey};
-use crate::prelude::*;
 use serde::{de::DeserializeOwned, Serialize};
-use serde_derive::Deserialize;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use slog::warn;
 use strum::IntoStaticStr;
+
+pub use self::{bool::BoolKey, notetype::get_aux_notetype_config_key, string::StringKey};
+use crate::prelude::*;
 
 /// Only used when updating/undoing.
 #[derive(Debug)]
@@ -46,12 +46,10 @@ pub(crate) enum ConfigKey {
 
     #[strum(to_string = "timeLim")]
     AnswerTimeLimitSecs,
-    #[strum(to_string = "sortType")]
-    BrowserSortKind,
     #[strum(to_string = "curDeck")]
-    CurrentDeckID,
+    CurrentDeckId,
     #[strum(to_string = "curModel")]
-    CurrentNoteTypeID,
+    CurrentNotetypeId,
     #[strum(to_string = "lastUnburied")]
     LastUnburiedDay,
     #[strum(to_string = "collapseTime")]
@@ -66,10 +64,32 @@ pub(crate) enum ConfigKey {
 
 #[derive(PartialEq, Serialize_repr, Deserialize_repr, Clone, Copy, Debug)]
 #[repr(u8)]
-pub(crate) enum SchedulerVersion {
+pub enum SchedulerVersion {
     V1 = 1,
     V2 = 2,
 }
+
+impl Collection {
+    pub fn set_config_json<T: Serialize>(
+        &mut self,
+        key: &str,
+        val: &T,
+        undoable: bool,
+    ) -> Result<OpOutput<()>> {
+        self.transact(Op::UpdateConfig, |col| {
+            col.set_config(key, val)?;
+            if !undoable {
+                col.clear_current_undo_step_changes()?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn remove_config(&mut self, key: &str) -> Result<OpOutput<()>> {
+        self.transact(Op::UpdateConfig, |col| col.remove_config_inner(key))
+    }
+}
+
 impl Collection {
     /// Get config item, returning None if missing/invalid.
     pub(crate) fn get_config_optional<'a, T, K>(&self, key: K) -> Option<T>
@@ -97,7 +117,8 @@ impl Collection {
         self.get_config_optional(key).unwrap_or_default()
     }
 
-    pub(crate) fn set_config<'a, T: Serialize, K>(&mut self, key: K, val: &T) -> Result<()>
+    /// True if added, or new value is different.
+    pub(crate) fn set_config<'a, T: Serialize, K>(&mut self, key: K, val: &T) -> Result<bool>
     where
         K: Into<&'a str>,
     {
@@ -110,7 +131,7 @@ impl Collection {
         self.set_config_undoable(entry)
     }
 
-    pub(crate) fn remove_config<'a, K>(&mut self, key: K) -> Result<()>
+    pub(crate) fn remove_config_inner<'a, K>(&mut self, key: K) -> Result<()>
     where
         K: Into<&'a str>,
     {
@@ -118,15 +139,11 @@ impl Collection {
     }
 
     /// Remove all keys starting with provided prefix, which must end with '_'.
-    pub(crate) fn remove_config_prefix(&self, key: &str) -> Result<()> {
+    pub(crate) fn remove_config_prefix(&mut self, key: &str) -> Result<()> {
         for (key, _val) in self.storage.get_config_prefix(key)? {
-            self.storage.remove_config(&key)?;
+            self.remove_config_inner(key.as_str())?;
         }
         Ok(())
-    }
-
-    pub(crate) fn get_browser_sort_kind(&self) -> SortKind {
-        self.get_config_default(ConfigKey::BrowserSortKind)
     }
 
     pub(crate) fn get_creation_utc_offset(&self) -> Option<i32> {
@@ -134,10 +151,12 @@ impl Collection {
     }
 
     pub(crate) fn set_creation_utc_offset(&mut self, mins: Option<i32>) -> Result<()> {
+        self.state.scheduler_info = None;
         if let Some(mins) = mins {
             self.set_config(ConfigKey::CreationOffset, &mins)
+                .map(|_| ())
         } else {
-            self.remove_config(ConfigKey::CreationOffset)
+            self.remove_config_inner(ConfigKey::CreationOffset)
         }
     }
 
@@ -146,7 +165,8 @@ impl Collection {
     }
 
     pub(crate) fn set_configured_utc_offset(&mut self, mins: i32) -> Result<()> {
-        self.set_config(ConfigKey::LocalOffset, &mins)
+        self.state.scheduler_info = None;
+        self.set_config(ConfigKey::LocalOffset, &mins).map(|_| ())
     }
 
     pub(crate) fn get_v2_rollover(&self) -> Option<u8> {
@@ -155,7 +175,8 @@ impl Collection {
     }
 
     pub(crate) fn set_v2_rollover(&mut self, hour: u32) -> Result<()> {
-        self.set_config(ConfigKey::Rollover, &hour)
+        self.state.scheduler_info = None;
+        self.set_config(ConfigKey::Rollover, &hour).map(|_| ())
     }
 
     pub(crate) fn get_next_card_position(&self) -> u32 {
@@ -172,6 +193,7 @@ impl Collection {
 
     pub(crate) fn set_next_card_position(&mut self, pos: u32) -> Result<()> {
         self.set_config(ConfigKey::NextNewCardPosition, &pos)
+            .map(|_| ())
     }
 
     pub(crate) fn scheduler_version(&self) -> SchedulerVersion {
@@ -181,7 +203,9 @@ impl Collection {
 
     /// Caution: this only updates the config setting.
     pub(crate) fn set_scheduler_version_config_key(&mut self, ver: SchedulerVersion) -> Result<()> {
+        self.state.scheduler_info = None;
         self.set_config(ConfigKey::SchedulerVersion, &ver)
+            .map(|_| ())
     }
 
     pub(crate) fn learn_ahead_secs(&self) -> u32 {
@@ -191,6 +215,7 @@ impl Collection {
 
     pub(crate) fn set_learn_ahead_secs(&mut self, secs: u32) -> Result<()> {
         self.set_config(ConfigKey::LearnAheadSecs, &secs)
+            .map(|_| ())
     }
 
     pub(crate) fn get_new_review_mix(&self) -> NewReviewMix {
@@ -203,6 +228,7 @@ impl Collection {
 
     pub(crate) fn set_new_review_mix(&mut self, mix: NewReviewMix) -> Result<()> {
         self.set_config(ConfigKey::NewReviewMix, &(mix as u8))
+            .map(|_| ())
     }
 
     pub(crate) fn get_first_day_of_week(&self) -> Weekday {
@@ -212,6 +238,7 @@ impl Collection {
 
     pub(crate) fn set_first_day_of_week(&mut self, weekday: Weekday) -> Result<()> {
         self.set_config(ConfigKey::FirstDayOfWeek, &weekday)
+            .map(|_| ())
     }
 
     pub(crate) fn get_answer_time_limit_secs(&self) -> u32 {
@@ -221,6 +248,7 @@ impl Collection {
 
     pub(crate) fn set_answer_time_limit_secs(&mut self, secs: u32) -> Result<()> {
         self.set_config(ConfigKey::AnswerTimeLimitSecs, &secs)
+            .map(|_| ())
     }
 
     pub(crate) fn get_last_unburied_day(&self) -> u32 {
@@ -230,36 +258,7 @@ impl Collection {
 
     pub(crate) fn set_last_unburied_day(&mut self, day: u32) -> Result<()> {
         self.set_config(ConfigKey::LastUnburiedDay, &day)
-    }
-}
-
-#[derive(Deserialize, PartialEq, Debug, Clone, Copy)]
-#[serde(rename_all = "camelCase")]
-pub enum SortKind {
-    #[serde(rename = "noteCrt")]
-    NoteCreation,
-    NoteMod,
-    #[serde(rename = "noteFld")]
-    NoteField,
-    #[serde(rename = "note")]
-    NoteType,
-    NoteTags,
-    CardMod,
-    CardReps,
-    CardDue,
-    CardEase,
-    CardLapses,
-    #[serde(rename = "cardIvl")]
-    CardInterval,
-    #[serde(rename = "deck")]
-    CardDeck,
-    #[serde(rename = "template")]
-    CardTemplate,
-}
-
-impl Default for SortKind {
-    fn default() -> Self {
-        Self::NoteCreation
+            .map(|_| ())
     }
 }
 
@@ -287,15 +286,12 @@ pub(crate) enum Weekday {
 
 #[cfg(test)]
 mod test {
-    use super::SortKind;
-    use crate::collection::open_test_collection;
-    use crate::decks::DeckID;
+    use crate::{collection::open_test_collection, decks::DeckId};
 
     #[test]
     fn defaults() {
         let col = open_test_collection();
-        assert_eq!(col.get_current_deck_id(), DeckID(1));
-        assert_eq!(col.get_browser_sort_kind(), SortKind::NoteField);
+        assert_eq!(col.get_current_deck_id(), DeckId(1));
     }
 
     #[test]

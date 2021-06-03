@@ -1,3 +1,6 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 # coding: utf-8
 
 from tests.shared import getEmptyCol
@@ -42,7 +45,7 @@ def test_genrem():
     mm = col.models
     # adding a new template should automatically create cards
     t = mm.newTemplate("rev")
-    t["qfmt"] = "{{Front}}"
+    t["qfmt"] = "{{Front}}2"
     t["afmt"] = ""
     mm.addTemplate(m, t)
     mm.save(m, templates=True)
@@ -74,7 +77,7 @@ def test_gendeck():
     assert note.cards()[0].did == 1
     # set the model to a new default col
     newId = col.decks.id("new")
-    cloze["did"] = newId
+    col.set_aux_notetype_config(cloze["id"], "lastDeck", newId)
     col.models.save(cloze, updateReqs=False)
     # a newly generated card should share the first card's col
     note["Text"] += "{{c2::two}}"

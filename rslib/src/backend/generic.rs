@@ -33,51 +33,45 @@ impl From<u32> for pb::UInt32 {
     }
 }
 
+impl From<usize> for pb::UInt32 {
+    fn from(val: usize) -> Self {
+        pb::UInt32 { val: val as u32 }
+    }
+}
+
 impl From<()> for pb::Empty {
     fn from(_val: ()) -> Self {
         pb::Empty {}
     }
 }
 
-impl From<pb::CardId> for CardID {
+impl From<pb::CardId> for CardId {
     fn from(cid: pb::CardId) -> Self {
-        CardID(cid.cid)
+        CardId(cid.cid)
     }
 }
 
-impl Into<Vec<CardID>> for pb::CardIDs {
-    fn into(self) -> Vec<CardID> {
-        self.cids.into_iter().map(CardID).collect()
+impl From<pb::CardIds> for Vec<CardId> {
+    fn from(c: pb::CardIds) -> Self {
+        c.cids.into_iter().map(CardId).collect()
     }
 }
 
-impl From<pb::NoteId> for NoteID {
+impl From<pb::NoteId> for NoteId {
     fn from(nid: pb::NoteId) -> Self {
-        NoteID(nid.nid)
+        NoteId(nid.nid)
     }
 }
 
-impl From<pb::NoteTypeId> for NoteTypeID {
-    fn from(ntid: pb::NoteTypeId) -> Self {
-        NoteTypeID(ntid.ntid)
+impl From<pb::NotetypeId> for NotetypeId {
+    fn from(ntid: pb::NotetypeId) -> Self {
+        NotetypeId(ntid.ntid)
     }
 }
 
-impl From<pb::DeckId> for DeckID {
-    fn from(did: pb::DeckId) -> Self {
-        DeckID(did.did)
-    }
-}
-
-impl From<DeckID> for pb::DeckId {
-    fn from(did: DeckID) -> Self {
-        pb::DeckId { did: did.0 }
-    }
-}
-
-impl From<pb::DeckConfigId> for DeckConfID {
+impl From<pb::DeckConfigId> for DeckConfigId {
     fn from(dcid: pb::DeckConfigId) -> Self {
-        DeckConfID(dcid.dcid)
+        DeckConfigId(dcid.dcid)
     }
 }
 

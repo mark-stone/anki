@@ -1,20 +1,23 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use std::{collections::HashSet, sync::Arc};
+
+use itertools::Itertools;
+use slog::debug;
+
 use crate::{
     collection::Collection,
-    err::{AnkiError, DBErrorKind, Result},
-    i18n::{tr_args, I18n, TR},
+    config::SchedulerVersion,
+    error::{AnkiError, DbError, DbErrorKind, Result},
+    i18n::I18n,
     notetype::{
-        all_stock_notetypes, AlreadyGeneratedCardInfo, CardGenContext, NoteType, NoteTypeID,
-        NoteTypeKind,
+        all_stock_notetypes, AlreadyGeneratedCardInfo, CardGenContext, Notetype, NotetypeId,
+        NotetypeKind,
     },
     prelude::*,
     timestamp::{TimestampMillis, TimestampSecs},
 };
-use itertools::Itertools;
-use slog::debug;
-use std::{collections::HashSet, sync::Arc};
 
 #[derive(Debug, Default, PartialEq)]
 pub struct CheckDatabaseOutput {
@@ -40,72 +43,42 @@ pub(crate) enum DatabaseCheckProgress {
 }
 
 impl CheckDatabaseOutput {
-    pub fn to_i18n_strings(&self, i18n: &I18n) -> Vec<String> {
+    pub fn to_i18n_strings(&self, tr: &I18n) -> Vec<String> {
         let mut probs = Vec::new();
 
         if self.notetypes_recovered > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckNotetypesRecovered,
-                tr_args!["count"=>self.revlog_properties_invalid],
-            ));
+            probs.push(tr.database_check_notetypes_recovered());
         }
 
         if self.card_position_too_high > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckNewCardHighDue,
-                tr_args!["count"=>self.card_position_too_high],
-            ));
+            probs.push(tr.database_check_new_card_high_due(self.card_position_too_high));
         }
         if self.card_properties_invalid > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckCardProperties,
-                tr_args!["count"=>self.card_properties_invalid],
-            ));
+            probs.push(tr.database_check_card_properties(self.card_properties_invalid));
         }
         if self.cards_missing_note > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckCardMissingNote,
-                tr_args!["count"=>self.cards_missing_note],
-            ));
+            probs.push(tr.database_check_card_missing_note(self.cards_missing_note));
         }
         if self.decks_missing > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckMissingDecks,
-                tr_args!["count"=>self.decks_missing],
-            ));
+            probs.push(tr.database_check_missing_decks(self.decks_missing));
         }
         if self.field_count_mismatch > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckFieldCount,
-                tr_args!["count"=>self.field_count_mismatch],
-            ));
+            probs.push(tr.database_check_field_count(self.field_count_mismatch));
         }
         if self.card_ords_duplicated > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckDuplicateCardOrds,
-                tr_args!["count"=>self.card_ords_duplicated],
-            ));
+            probs.push(tr.database_check_duplicate_card_ords(self.card_ords_duplicated));
         }
         if self.templates_missing > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckMissingTemplates,
-                tr_args!["count"=>self.templates_missing],
-            ));
+            probs.push(tr.database_check_missing_templates(self.templates_missing));
         }
         if self.revlog_properties_invalid > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckRevlogProperties,
-                tr_args!["count"=>self.revlog_properties_invalid],
-            ));
+            probs.push(tr.database_check_revlog_properties(self.revlog_properties_invalid));
         }
         if self.invalid_utf8 > 0 {
-            probs.push(i18n.trn(
-                TR::DatabaseCheckNotesWithInvalidUtf8,
-                tr_args!["count"=>self.invalid_utf8],
-            ));
+            probs.push(tr.database_check_notes_with_invalid_utf8(self.invalid_utf8));
         }
 
-        probs
+        probs.into_iter().map(Into::into).collect()
     }
 }
 
@@ -119,17 +92,17 @@ impl Collection {
         debug!(self.log, "quick check");
         if self.storage.quick_check_corrupt() {
             debug!(self.log, "quick check failed");
-            return Err(AnkiError::DBError {
-                info: self.i18n.tr(TR::DatabaseCheckCorrupt).into(),
-                kind: DBErrorKind::Corrupt,
-            });
+            return Err(AnkiError::db_error(
+                self.tr.database_check_corrupt(),
+                DbErrorKind::Corrupt,
+            ));
         }
 
         progress_fn(DatabaseCheckProgress::Optimize, false);
         debug!(self.log, "optimize");
         self.storage.optimize()?;
 
-        self.transact(None, |col| col.check_database_inner(progress_fn))
+        self.transact_no_undo(|col| col.check_database_inner(progress_fn))
     }
 
     fn check_database_inner<F>(&mut self, mut progress_fn: F) -> Result<CheckDatabaseOutput>
@@ -172,6 +145,7 @@ impl Collection {
             timing.days_elapsed,
             TimestampSecs::now(),
             self.usn()?,
+            self.scheduler_version() == SchedulerVersion::V1,
         )?;
         out.card_position_too_high = new_cnt;
         out.card_properties_invalid += other_cnt;
@@ -181,7 +155,7 @@ impl Collection {
     fn check_orphaned_cards(&mut self, out: &mut CheckDatabaseOutput) -> Result<()> {
         let cnt = self.storage.delete_orphaned_cards()?;
         if cnt > 0 {
-            self.storage.set_schema_modified()?;
+            self.set_schema_modified()?;
             out.cards_missing_note = cnt;
         }
         Ok(())
@@ -214,7 +188,7 @@ impl Collection {
         }
 
         if wrong > 0 {
-            self.storage.set_schema_modified()?;
+            self.set_schema_modified()?;
             out.card_properties_invalid += wrong;
         }
 
@@ -230,7 +204,7 @@ impl Collection {
         F: FnMut(DatabaseCheckProgress, bool),
     {
         let nids_by_notetype = self.storage.all_note_ids_by_notetype()?;
-        let norm = self.get_bool(BoolKey::NormalizeNoteText);
+        let norm = self.get_config_bool(BoolKey::NormalizeNoteText);
         let usn = self.usn()?;
         let stamp = TimestampMillis::now();
 
@@ -282,8 +256,12 @@ impl Collection {
                 note.notetype_id = nt.id;
 
                 // write note, updating tags and generating missing cards
-                let ctx = genctx.get_or_insert_with(|| CardGenContext::new(&nt, usn));
-                self.update_note_inner_generating_cards(&ctx, &mut note, &original, false, norm)?;
+                let ctx = genctx.get_or_insert_with(|| {
+                    CardGenContext::new(&nt, self.get_last_deck_added_to_for_notetype(nt.id), usn)
+                });
+                self.update_note_inner_generating_cards(
+                    &ctx, &mut note, &original, false, norm, true,
+                )?;
             }
         }
 
@@ -294,7 +272,7 @@ impl Collection {
         // if the collection is empty and the user has deleted all note types, ensure at least
         // one note type exists
         if self.storage.get_all_notetype_names()?.is_empty() {
-            let mut nt = all_stock_notetypes(&self.i18n).remove(0);
+            let mut nt = all_stock_notetypes(&self.tr).remove(0);
             self.add_notetype_inner(&mut nt, usn)?;
         }
 
@@ -303,7 +281,7 @@ impl Collection {
             || out.templates_missing > 0
             || out.notetypes_recovered > 0
         {
-            self.storage.set_schema_modified()?;
+            self.set_schema_modified()?;
         }
 
         Ok(())
@@ -311,16 +289,16 @@ impl Collection {
 
     fn get_note_fixing_invalid_utf8(
         &self,
-        nid: NoteID,
+        nid: NoteId,
         out: &mut CheckDatabaseOutput,
     ) -> Result<Note> {
         match self.storage.get_note(nid) {
             Ok(note) => Ok(note.unwrap()),
             Err(err) => match err {
-                AnkiError::DBError {
-                    kind: DBErrorKind::Utf8,
+                AnkiError::DbError(DbError {
+                    kind: DbErrorKind::Utf8,
                     ..
-                } => {
+                }) => {
                     // fix note then fetch again
                     self.storage.fix_invalid_utf8_in_note(nid)?;
                     out.invalid_utf8 += 1;
@@ -350,10 +328,10 @@ impl Collection {
 
     fn remove_cards_without_template(
         &mut self,
-        nt: &NoteType,
+        nt: &Notetype,
         cards: &[AlreadyGeneratedCardInfo],
     ) -> Result<usize> {
-        if nt.config.kind() == NoteTypeKind::Cloze {
+        if nt.config.kind() == NotetypeKind::Cloze {
             return Ok(0);
         }
         let mut removed = 0;
@@ -371,13 +349,13 @@ impl Collection {
         &mut self,
         stamp: TimestampMillis,
         field_count: usize,
-        previous_id: NoteTypeID,
-    ) -> Result<Arc<NoteType>> {
+        previous_id: NotetypeId,
+    ) -> Result<Arc<Notetype>> {
         debug!(self.log, "create recovery notetype");
         let extra_cards_required = self
             .storage
             .highest_card_ordinal_for_notetype(previous_id)?;
-        let mut basic = all_stock_notetypes(&self.i18n).remove(0);
+        let mut basic = all_stock_notetypes(&self.tr).remove(0);
         let mut field = 3;
         while basic.fields.len() < field_count {
             basic.add_field(format!("{}", field));
@@ -393,10 +371,10 @@ impl Collection {
         Ok(Arc::new(basic))
     }
 
-    fn check_revlog(&self, out: &mut CheckDatabaseOutput) -> Result<()> {
+    fn check_revlog(&mut self, out: &mut CheckDatabaseOutput) -> Result<()> {
         let cnt = self.storage.fix_revlog_properties()?;
         if cnt > 0 {
-            self.storage.set_schema_modified()?;
+            self.set_schema_modified()?;
             out.revlog_properties_invalid = cnt;
         }
 
@@ -418,7 +396,7 @@ impl Collection {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{collection::open_test_collection, decks::DeckID, search::SortMode};
+    use crate::{collection::open_test_collection, decks::DeckId, search::SortMode};
 
     fn progress_fn(_progress: DatabaseCheckProgress, _throttle: bool) {}
 
@@ -427,7 +405,7 @@ mod test {
         let mut col = open_test_collection();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
-        col.add_note(&mut note, DeckID(1))?;
+        col.add_note(&mut note, DeckId(1))?;
 
         // card properties
         col.storage
@@ -458,7 +436,11 @@ mod test {
             }
         );
         assert_eq!(
-            col.storage.get_deck(DeckID(123))?.unwrap().name,
+            col.storage
+                .get_deck(DeckId(123))?
+                .unwrap()
+                .name
+                .as_native_str(),
             "recovered123"
         );
 
@@ -512,7 +494,7 @@ mod test {
         let mut col = open_test_collection();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
-        col.add_note(&mut note, DeckID(1))?;
+        col.add_note(&mut note, DeckId(1))?;
 
         // duplicate ordinals
         let cid = col.search_cards("", SortMode::NoOrder)?[0];
@@ -561,7 +543,7 @@ mod test {
         let mut col = open_test_collection();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
         let mut note = nt.new_note();
-        col.add_note(&mut note, DeckID(1))?;
+        col.add_note(&mut note, DeckId(1))?;
 
         // excess fields get joined into the last one
         col.storage
@@ -637,9 +619,9 @@ mod test {
         let mut note = nt.new_note();
         note.tags.push("one".into());
         note.tags.push("two".into());
-        col.add_note(&mut note, DeckID(1))?;
+        col.add_note(&mut note, DeckId(1))?;
 
-        col.set_tag_expanded("one", true)?;
+        col.set_tag_collapsed("one", false)?;
 
         col.check_database(progress_fn)?;
 

@@ -1,20 +1,28 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
-    import type { I18n } from "anki/i18n";
+    import { createEventDispatcher } from "svelte";
+
+    import type pb from "lib/backend_proto";
+
+    import Graph from "./Graph.svelte";
+    import InputBox from "./InputBox.svelte";
+    import HistogramGraph from "./HistogramGraph.svelte";
+    import GraphRangeRadios from "./GraphRangeRadios.svelte";
+    import TableData from "./TableData.svelte";
+    import type { PreferenceStore } from "sveltelib/preferences";
+
     import type { HistogramData } from "./histogram-graph";
     import { GraphRange, RevlogRange } from "./graph-helpers";
     import type { TableDatum, SearchEventMap } from "./graph-helpers";
     import { gatherData, buildHistogram } from "./future-due";
     import type { GraphData } from "./future-due";
-    import type pb from "anki/backend_proto";
-    import HistogramGraph from "./HistogramGraph.svelte";
-    import GraphRangeRadios from "./GraphRangeRadios.svelte";
-    import TableData from "./TableData.svelte";
-    import { createEventDispatcher } from "svelte";
-    import type { PreferenceStore } from "./preferences";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
-    export let i18n: I18n;
-    export let preferences: PreferenceStore;
+    import * as tr from "lib/i18n";
+    export let preferences: PreferenceStore<pb.BackendProto.GraphPreferences>;
 
     const dispatch = createEventDispatcher<SearchEventMap>();
 
@@ -33,23 +41,18 @@
             graphData,
             graphRange,
             $futureDueShowBacklog,
-            i18n,
             dispatch,
             $browserLinksSupported
         ));
     }
 
-    const title = i18n.tr(i18n.TR.STATISTICS_FUTURE_DUE_TITLE);
-    const subtitle = i18n.tr(i18n.TR.STATISTICS_FUTURE_DUE_SUBTITLE);
-    const backlogLabel = i18n.tr(i18n.TR.STATISTICS_BACKLOG_CHECKBOX);
+    const title = tr.statisticsFutureDueTitle();
+    const subtitle = tr.statisticsFutureDueSubtitle();
+    const backlogLabel = tr.statisticsBacklogCheckbox();
 </script>
 
-<div class="graph" id="graph-future-due">
-    <h1>{title}</h1>
-
-    <div class="subtitle">{subtitle}</div>
-
-    <div class="range-box-inner">
+<Graph {title} {subtitle}>
+    <InputBox>
         {#if graphData && graphData.haveBacklog}
             <label>
                 <input type="checkbox" bind:checked={$futureDueShowBacklog} />
@@ -57,10 +60,10 @@
             </label>
         {/if}
 
-        <GraphRangeRadios bind:graphRange {i18n} revlogRange={RevlogRange.All} />
-    </div>
+        <GraphRangeRadios bind:graphRange revlogRange={RevlogRange.All} />
+    </InputBox>
 
-    <HistogramGraph data={histogramData} {i18n} />
+    <HistogramGraph data={histogramData} />
 
-    <TableData {i18n} {tableData} />
-</div>
+    <TableData {tableData} />
+</Graph>

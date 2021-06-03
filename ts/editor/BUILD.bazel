@@ -1,44 +1,151 @@
 load("@npm//@bazel/typescript:index.bzl", "ts_library")
-load("@npm//@bazel/rollup:index.bzl", "rollup_bundle")
+load("//ts/svelte:svelte.bzl", "compile_svelte", "svelte_check")
 load("//ts:prettier.bzl", "prettier_test")
 load("//ts:eslint.bzl", "eslint_test")
-load("@io_bazel_rules_sass//:defs.bzl", "sass_binary")
+load("//ts:esbuild.bzl", "esbuild")
+load("//ts:vendor.bzl", "copy_bootstrap_icons", "copy_mdi_icons")
+load("//ts:compile_sass.bzl", "compile_sass")
 
-sass_binary(
-    name = "editor_css",
-    src = "editor.scss",
+svelte_files = glob(["*.svelte"])
+
+svelte_names = [f.replace(".svelte", "") for f in svelte_files]
+
+filegroup(
+    name = "svelte_components",
+    srcs = svelte_names,
     visibility = ["//visibility:public"],
 )
 
-sass_binary(
-    name = "editable_css",
-    src = "editable.scss",
+compile_svelte(
+    name = "svelte",
+    srcs = svelte_files,
     visibility = ["//visibility:public"],
+    deps = [
+        "//ts/components",
+    ],
+)
+
+compile_sass(
+    srcs = [
+        "editable.scss",
+    ],
+    group = "editable_scss",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ts/sass:scrollbar_lib",
+    ],
+)
+
+compile_sass(
+    srcs = [
+        "fields.scss",
+    ],
+    group = "base_css",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ts/sass:base_lib",
+        "//ts/sass:buttons_lib",
+        "//ts/sass:scrollbar_lib",
+    ],
+)
+
+compile_sass(
+    srcs = [
+        "bootstrap.scss",
+        "legacy.scss",
+    ],
+    group = "local_css",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ts/sass:button_mixins_lib",
+        "//ts/sass/bootstrap",
+    ],
 )
 
 ts_library(
     name = "editor_ts",
     srcs = glob(["*.ts"]),
-    tsconfig = "//qt/aqt/data/web/js:tsconfig.json",
+    tsconfig = "//ts:tsconfig.json",
     deps = [
-        "@npm//@types/jquery",
-    ],
+        "//ts/lib",
+        "//ts/sveltelib",
+        "//ts/components",
+        "//ts/html-filter",
+        "//ts:image_module_support",
+        "@npm//svelte",
+    ] + svelte_names,
 )
 
-rollup_bundle(
+copy_bootstrap_icons(
+    name = "bootstrap-icons",
+    icons = [
+        "pin-angle.svg",
+
+        # inline formatting
+        "type-bold.svg",
+        "type-italic.svg",
+        "type-underline.svg",
+        "eraser.svg",
+        "square-fill.svg",
+        "paperclip.svg",
+        "mic.svg",
+
+        # block formatting
+        "list-ul.svg",
+        "list-ol.svg",
+        "text-paragraph.svg",
+        "justify.svg",
+        "text-left.svg",
+        "text-right.svg",
+        "text-center.svg",
+        "text-indent-left.svg",
+        "text-indent-right.svg",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+copy_mdi_icons(
+    name = "mdi-icons",
+    icons = [
+        "format-superscript.svg",
+        "format-subscript.svg",
+        "function-variant.svg",
+        "code-brackets.svg",
+        "xml.svg",
+
+        "format-color-text.svg",
+        "format-color-highlight.svg",
+        "color-helper.svg",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+esbuild(
     name = "editor",
-    config_file = "//ts:rollup.aqt.config.js",
-    entry_point = "index.ts",
-    format = "iife",
-    link_workspace_root = True,
-    silent = True,
-    sourcemap = "false",
+    srcs = [
+        "//ts:protobuf-shim.js",
+    ],
+    args = [
+        "--loader:.svg=text",
+        "--inject:$(location //ts:protobuf-shim.js)",
+        "--resolve-extensions=.mjs,.js",
+        "--log-level=warning",
+    ],
+    entry_point = "index_wrapper.ts",
+    external = [
+        "protobufjs/light",
+    ],
+    output_css = "editor.css",
     visibility = ["//visibility:public"],
     deps = [
+        "base_css",
+        "bootstrap-icons",
         "editor_ts",
-        "@npm//@rollup/plugin-commonjs",
-        "@npm//@rollup/plugin-node-resolve",
-        "@npm//rollup-plugin-terser",
+        "local_css",
+        "mdi-icons",
+        "svelte_components",
+        "//ts/components",
+        "//ts/components:svelte_components",
     ],
 )
 
@@ -49,14 +156,28 @@ prettier_test(
     name = "format_check",
     srcs = glob([
         "*.ts",
+        "*.svelte",
     ]),
 )
 
-# eslint_test(
-#     name = "eslint",
-#     srcs = glob(
-#         [
-#             "*.ts",
-#         ],
-#     ),
-# )
+eslint_test(
+    name = "eslint",
+    srcs = glob(
+        [
+            "*.ts",
+        ],
+    ),
+)
+
+svelte_check(
+    name = "svelte_check",
+    srcs = glob([
+        "*.ts",
+        "*.svelte",
+    ]) + [
+        "//ts/sass:button_mixins_lib",
+        "//ts/sass/bootstrap",
+        "//ts/components:svelte_components",
+        "@npm//@types/bootstrap",
+    ],
+)

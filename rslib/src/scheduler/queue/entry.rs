@@ -2,8 +2,7 @@
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 use super::{LearningQueueEntry, MainQueueEntry, MainQueueEntryKind};
-use crate::card::CardQueue;
-use crate::prelude::*;
+use crate::{card::CardQueue, prelude::*};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum QueueEntry {
@@ -12,7 +11,7 @@ pub(crate) enum QueueEntry {
 }
 
 impl QueueEntry {
-    pub fn card_id(&self) -> CardID {
+    pub fn card_id(&self) -> CardId {
         match self {
             QueueEntry::IntradayLearning(e) => e.id,
             QueueEntry::Main(e) => e.id,
@@ -38,10 +37,10 @@ impl QueueEntry {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum QueueEntryKind {
+pub enum QueueEntryKind {
     New,
-    Review,
     Learning,
+    Review,
 }
 
 impl From<&Card> for QueueEntry {
@@ -77,5 +76,17 @@ impl From<LearningQueueEntry> for QueueEntry {
 impl From<MainQueueEntry> for QueueEntry {
     fn from(e: MainQueueEntry) -> Self {
         Self::Main(e)
+    }
+}
+
+impl From<&LearningQueueEntry> for QueueEntry {
+    fn from(e: &LearningQueueEntry) -> Self {
+        Self::IntradayLearning(*e)
+    }
+}
+
+impl From<&MainQueueEntry> for QueueEntry {
+    fn from(e: &MainQueueEntry) -> Self {
+        Self::Main(*e)
     }
 }

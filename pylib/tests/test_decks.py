@@ -1,3 +1,6 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 # coding: utf-8
 
 from anki.errors import DeckRenameError
@@ -18,6 +21,7 @@ def test_basic():
     assert col.decks.id("new deck") == parentId
     # we start with the default col selected
     assert col.decks.selected() == 1
+    col.reset()
     assert col.decks.active() == [1]
     # we can select a different col
     col.decks.select(parentId)

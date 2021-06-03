@@ -1,9 +1,16 @@
+// Copyright: Ankitects Pty Ltd and contributors
+// License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
+/* eslint
+@typescript-eslint/no-non-null-assertion: "off",
+ */
+
 import type { Editable } from "./editable";
 
+import { updateActiveButtons } from "./toolbar";
 import { bridgeCommand } from "./lib";
 import { onInput, onKey, onKeyUp } from "./inputHandlers";
 import { onFocus, onBlur } from "./focusHandlers";
-import { updateButtonState } from "./toolbar";
 
 function onPaste(evt: ClipboardEvent): void {
     bridgeCommand("paste");
@@ -57,7 +64,7 @@ export class EditingArea extends HTMLDivElement {
         this.addEventListener("paste", onPaste);
         this.addEventListener("copy", onCutOrCopy);
         this.addEventListener("oncut", onCutOrCopy);
-        this.addEventListener("mouseup", updateButtonState);
+        this.addEventListener("mouseup", updateActiveButtons);
 
         const baseStyleSheet = this.baseStyle.sheet as CSSStyleSheet;
         baseStyleSheet.insertRule("anki-editable {}", 0);
@@ -72,7 +79,7 @@ export class EditingArea extends HTMLDivElement {
         this.removeEventListener("paste", onPaste);
         this.removeEventListener("copy", onCutOrCopy);
         this.removeEventListener("oncut", onCutOrCopy);
-        this.removeEventListener("mouseup", updateButtonState);
+        this.removeEventListener("mouseup", updateActiveButtons);
     }
 
     initialize(color: string, content: string): void {

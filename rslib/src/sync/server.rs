@@ -3,6 +3,10 @@
 
 use std::{fs, path::Path};
 
+use async_trait::async_trait;
+use tempfile::NamedTempFile;
+
+use super::ChunkableIds;
 use crate::{
     prelude::*,
     storage::open_and_check_sqlite_file,
@@ -11,10 +15,6 @@ use crate::{
         UnchunkedChanges, Usn,
     },
 };
-use async_trait::async_trait;
-use tempfile::NamedTempFile;
-
-use super::ChunkableIDs;
 #[async_trait(?Send)]
 pub trait SyncServer {
     async fn meta(&self) -> Result<SyncMeta>;
@@ -54,7 +54,7 @@ pub struct LocalServer {
     /// config to client.
     client_is_newer: bool,
     /// Set on the first call to chunk()
-    server_chunk_ids: Option<ChunkableIDs>,
+    server_chunk_ids: Option<ChunkableIds>,
 }
 
 impl LocalServer {
@@ -80,9 +80,10 @@ impl LocalServer {
 #[async_trait(?Send)]
 impl SyncServer for LocalServer {
     async fn meta(&self) -> Result<SyncMeta> {
+        let stamps = self.col.storage.get_collection_timestamps()?;
         Ok(SyncMeta {
-            modified: self.col.storage.get_modified_time()?,
-            schema: self.col.storage.get_schema_mtime()?,
+            modified: stamps.collection_change,
+            schema: stamps.schema_change,
             usn: self.col.storage.usn(true)?,
             current_time: TimestampSecs::now(),
             server_message: String::new(),
@@ -210,7 +211,8 @@ impl SyncServer for LocalServer {
         _col_folder: Option<&Path>,
     ) -> Result<NamedTempFile> {
         // bump usn/mod & close
-        self.col.transact(None, |col| col.storage.increment_usn())?;
+        self.col
+            .transact_no_undo(|col| col.storage.increment_usn())?;
         let col_path = self.col.col_path.clone();
         self.col.close(true)?;
 

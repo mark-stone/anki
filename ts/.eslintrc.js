@@ -8,7 +8,8 @@ module.exports = {
     plugins: ["@typescript-eslint"],
     rules: {
         "prefer-const": "warn",
-        "@typescript-eslint/ban-ts-ignore": "warn",
+        "no-nested-ternary": "warn",
+        "@typescript-eslint/ban-ts-comment": "warn",
         "@typescript-eslint/no-unused-vars": [
             "warn",
             { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },

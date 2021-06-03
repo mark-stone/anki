@@ -6,15 +6,15 @@ import argparse
 import glob
 import logging
 import os
-import shutil
-import sys
 import re
+import shutil
 import subprocess
+import sys
+
+import pkginfo
 
 from pip._internal.commands import create_command
 from pip._vendor import pkg_resources
-
-import pkginfo
 
 
 def _create_nspkg_init(dirpath):
@@ -91,7 +91,17 @@ def copy_and_fix_pyi(source, dest):
     with open(source) as input_file:
         with open(dest, "w") as output_file:
             for line in input_file.readlines():
+                # assigning to None is a syntax error
                 line = fix_none.sub(r"\1_ =", line)
+                # inheriting from the missing sip.sipwrapper definition
+                # causes missing attributes not to be detected, as it's treating
+                # the class as inheriting from Any
+                line = line.replace("sip.simplewrapper", "object")
+                line = line.replace("sip.wrapper", "object")
+                # remove blanket getattr in QObject which also causes missing
+                # attributes not to be detected
+                if "def __getattr__(self, name: str) -> typing.Any" in line:
+                    continue
                 output_file.write(line)
 
 

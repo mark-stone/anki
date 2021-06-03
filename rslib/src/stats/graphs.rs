@@ -22,11 +22,13 @@ impl Collection {
 
     fn graph_data(&mut self, all: bool, days: u32) -> Result<pb::GraphsOut> {
         let timing = self.timing_today()?;
-        let revlog_start = TimestampSecs(if days > 0 {
-            timing.next_day_at - (((days as i64) + 1) * 86_400)
+        let revlog_start = if days > 0 {
+            timing
+                .next_day_at
+                .adding_secs(-(((days as i64) + 1) * 86_400))
         } else {
-            0
-        });
+            TimestampSecs(0)
+        };
 
         let offset = self.local_utc_offset_for_user()?;
         let local_offset_secs = offset.local_minus_utc() as i64;
@@ -45,19 +47,20 @@ impl Collection {
             cards: cards.into_iter().map(Into::into).collect(),
             revlog,
             days_elapsed: timing.days_elapsed,
-            next_day_at_secs: timing.next_day_at as u32,
+            next_day_at_secs: timing.next_day_at.0 as u32,
             scheduler_version: self.scheduler_version() as u32,
             local_offset_secs: local_offset_secs as i32,
         })
     }
 
-    pub(crate) fn get_graph_preferences(&self) -> Result<pb::GraphPreferences> {
-        Ok(pb::GraphPreferences {
+    pub(crate) fn get_graph_preferences(&self) -> pb::GraphPreferences {
+        pb::GraphPreferences {
             calendar_first_day_of_week: self.get_first_day_of_week() as i32,
-            card_counts_separate_inactive: self.get_bool(BoolKey::CardCountsSeparateInactive),
+            card_counts_separate_inactive: self
+                .get_config_bool(BoolKey::CardCountsSeparateInactive),
             browser_links_supported: true,
-            future_due_show_backlog: self.get_bool(BoolKey::FutureDueShowBacklog),
-        })
+            future_due_show_backlog: self.get_config_bool(BoolKey::FutureDueShowBacklog),
+        }
     }
 
     pub(crate) fn set_graph_preferences(&mut self, prefs: pb::GraphPreferences) -> Result<()> {
@@ -67,11 +70,11 @@ impl Collection {
             6 => Weekday::Saturday,
             _ => Weekday::Sunday,
         })?;
-        self.set_bool(
+        self.set_config_bool_inner(
             BoolKey::CardCountsSeparateInactive,
             prefs.card_counts_separate_inactive,
         )?;
-        self.set_bool(BoolKey::FutureDueShowBacklog, prefs.future_due_show_backlog)?;
+        self.set_config_bool_inner(BoolKey::FutureDueShowBacklog, prefs.future_due_show_backlog)?;
         Ok(())
     }
 }

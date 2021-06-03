@@ -6,8 +6,8 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-import { CardQueue, CardType } from "anki/cards";
-import type pb from "anki/backend_proto";
+import { CardQueue, CardType } from "lib/cards";
+import type pb from "lib/backend_proto";
 import {
     schemeGreens,
     schemeBlues,
@@ -21,7 +21,8 @@ import {
     cumsum,
 } from "d3";
 import type { GraphBounds } from "./graph-helpers";
-import type { I18n } from "anki/i18n";
+
+import * as tr from "lib/i18n";
 
 type Count = [string, number, boolean, string];
 export interface GraphData {
@@ -42,8 +43,7 @@ const barColours = [
 
 function countCards(
     cards: pb.BackendProto.ICard[],
-    separateInactive: boolean,
-    i18n: I18n
+    separateInactive: boolean
 ): Count[] {
     let newCards = 0;
     let learn = 0;
@@ -89,48 +89,38 @@ function countCards(
     const extraQuery = separateInactive ? 'AND -("is:buried" OR "is:suspended")' : "";
 
     const counts: Count[] = [
+        [tr.statisticsCountsNewCards(), newCards, true, `"is:new"${extraQuery}`],
         [
-            i18n.tr(i18n.TR.STATISTICS_COUNTS_NEW_CARDS),
-            newCards,
-            true,
-            `"is:new"${extraQuery}`,
-        ],
-        [
-            i18n.tr(i18n.TR.STATISTICS_COUNTS_LEARNING_CARDS),
+            tr.statisticsCountsLearningCards(),
             learn,
             true,
             `(-"is:review" AND "is:learn")${extraQuery}`,
         ],
         [
-            i18n.tr(i18n.TR.STATISTICS_COUNTS_RELEARNING_CARDS),
+            tr.statisticsCountsRelearningCards(),
             relearn,
             true,
             `("is:review" AND "is:learn")${extraQuery}`,
         ],
         [
-            i18n.tr(i18n.TR.STATISTICS_COUNTS_YOUNG_CARDS),
+            tr.statisticsCountsYoungCards(),
             young,
             true,
             `("is:review" AND -"is:learn") AND "prop:ivl<21"${extraQuery}`,
         ],
         [
-            i18n.tr(i18n.TR.STATISTICS_COUNTS_MATURE_CARDS),
+            tr.statisticsCountsMatureCards(),
             mature,
             true,
             `("is:review" -"is:learn") AND "prop:ivl>=21"${extraQuery}`,
         ],
         [
-            i18n.tr(i18n.TR.STATISTICS_COUNTS_SUSPENDED_CARDS),
+            tr.statisticsCountsSuspendedCards(),
             suspended,
             separateInactive,
             '"is:suspended"',
         ],
-        [
-            i18n.tr(i18n.TR.STATISTICS_COUNTS_BURIED_CARDS),
-            buried,
-            separateInactive,
-            '"is:buried"',
-        ],
+        [tr.statisticsCountsBuriedCards(), buried, separateInactive, '"is:buried"'],
     ];
 
     return counts;
@@ -138,25 +128,16 @@ function countCards(
 
 export function gatherData(
     data: pb.BackendProto.GraphsOut,
-    separateInactive: boolean,
-    i18n: I18n
+    separateInactive: boolean
 ): GraphData {
     const totalCards = data.cards.length;
-    const counts = countCards(data.cards, separateInactive, i18n);
+    const counts = countCards(data.cards, separateInactive);
 
     return {
-        title: i18n.tr(i18n.TR.STATISTICS_COUNTS_TITLE),
+        title: tr.statisticsCountsTitle(),
         counts,
         totalCards,
     };
-}
-
-interface Reviews {
-    mature: number;
-    young: number;
-    learn: number;
-    relearn: number;
-    early: number;
 }
 
 export interface SummedDatum {

@@ -1,16 +1,18 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{
-    card::{Card, CardID, CardQueue, CardType},
-    collection::Collection,
-    deckconf::INITIAL_EASE_FACTOR_THOUSANDS,
-    err::Result,
-    prelude::AnkiError,
-};
 use lazy_static::lazy_static;
 use rand::distributions::{Distribution, Uniform};
 use regex::Regex;
+
+use crate::{
+    card::{Card, CardId, CardQueue, CardType},
+    collection::Collection,
+    config::StringKey,
+    deckconfig::INITIAL_EASE_FACTOR_THOUSANDS,
+    error::Result,
+    prelude::*,
+};
 
 impl Card {
     /// Make card due in `days_from_today`.
@@ -84,21 +86,33 @@ pub fn parse_due_date_str(s: &str) -> Result<DueDateSpecifier> {
 }
 
 impl Collection {
-    pub fn set_due_date(&mut self, cids: &[CardID], spec: DueDateSpecifier) -> Result<()> {
+    /// `days` should be in a format parseable by `parse_due_date_str`.
+    /// If `context` is provided, provided key will be updated with the new
+    /// value of `days`.
+    pub fn set_due_date(
+        &mut self,
+        cids: &[CardId],
+        days: &str,
+        context: Option<StringKey>,
+    ) -> Result<OpOutput<()>> {
+        let spec = parse_due_date_str(days)?;
         let usn = self.usn()?;
         let today = self.timing_today()?.days_elapsed;
         let mut rng = rand::thread_rng();
         let distribution = Uniform::from(spec.min..=spec.max);
-        self.transact(None, |col| {
+        self.transact(Op::SetDueDate, |col| {
             col.storage.set_search_table_to_card_ids(cids, false)?;
             for mut card in col.storage.all_searched_cards()? {
                 let original = card.clone();
                 let days_from_today = distribution.sample(&mut rng);
                 card.set_due_date(today, days_from_today, spec.force_reset);
                 col.log_manually_scheduled_review(&card, &original, usn)?;
-                col.update_card_inner(&mut card, &original, usn)?;
+                col.update_card_inner(&mut card, original, usn)?;
             }
             col.storage.clear_searched_cards_table()?;
+            if let Some(key) = context {
+                col.set_config_string_inner(key, days)?;
+            }
             Ok(())
         })
     }
@@ -152,7 +166,7 @@ mod test {
 
     #[test]
     fn due_date() {
-        let mut c = Card::new(NoteID(0), 0, DeckID(0), 0);
+        let mut c = Card::new(NoteId(0), 0, DeckId(0), 0);
 
         // setting the due date of a new card will convert it
         c.set_due_date(5, 2, false);
@@ -178,7 +192,7 @@ mod test {
         // should work in a filtered deck
         c.interval = 2;
         c.original_due = 7;
-        c.original_deck_id = DeckID(1);
+        c.original_deck_id = DeckId(1);
         c.due = -10000;
         c.queue = CardQueue::New;
         c.set_due_date(6, 1, false);
@@ -186,7 +200,7 @@ mod test {
         assert_eq!(c.interval, 2);
         assert_eq!(c.queue, CardQueue::Review);
         assert_eq!(c.original_due, 0);
-        assert_eq!(c.original_deck_id, DeckID(0));
+        assert_eq!(c.original_deck_id, DeckId(0));
 
         // relearning treated like review
         c.ctype = CardType::Relearn;

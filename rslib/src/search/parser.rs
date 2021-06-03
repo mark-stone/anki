@@ -1,11 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{
-    decks::DeckID,
-    err::{ParseError, Result, SearchErrorKind as FailKind},
-    notetype::NoteTypeID,
-};
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use nom::{
     branch::alt,
@@ -17,6 +13,11 @@ use nom::{
     sequence::{preceded, separated_pair},
 };
 use regex::{Captures, Regex};
+
+use crate::{
+    error::{ParseError, Result, SearchErrorKind as FailKind},
+    prelude::*,
+};
 
 type IResult<'a, O> = std::result::Result<(&'a str, O), nom::Err<ParseError<'a>>>;
 type ParseResult<'a, O> = std::result::Result<O, nom::Err<ParseError<'a>>>;
@@ -56,6 +57,28 @@ impl Node {
             vec![self]
         }
     }
+
+    pub fn all(iter: impl IntoIterator<Item = Node>) -> Node {
+        Node::Group(Itertools::intersperse(iter.into_iter(), Node::And).collect())
+    }
+
+    pub fn any(iter: impl IntoIterator<Item = Node>) -> Node {
+        Node::Group(Itertools::intersperse(iter.into_iter(), Node::Or).collect())
+    }
+}
+
+#[macro_export]
+macro_rules! match_all {
+    ($($param:expr),+ $(,)?) => {
+        $crate::search::Node::all(vec![$($param.into()),+])
+    };
+}
+
+#[macro_export]
+macro_rules! match_any {
+    ($($param:expr),+ $(,)?) => {
+        $crate::search::Node::any(vec![$($param.into()),+])
+    };
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -72,22 +95,27 @@ pub enum SearchNode {
     EditedInDays(u32),
     CardTemplate(TemplateKind),
     Deck(String),
-    DeckID(DeckID),
-    NoteTypeID(NoteTypeID),
-    NoteType(String),
+    /// Matches cards in a single deck (original_deck_id is not checked).
+    DeckIdWithoutChildren(DeckId),
+    /// Matches cards in a deck or its children (original_deck_id is not
+    /// checked).
+    DeckIdWithChildren(DeckId),
+    IntroducedInDays(u32),
+    NotetypeId(NotetypeId),
+    Notetype(String),
     Rated {
         days: u32,
         ease: RatingKind,
     },
     Tag(String),
     Duplicates {
-        note_type_id: NoteTypeID,
+        notetype_id: NotetypeId,
         text: String,
     },
     State(StateKind),
     Flag(u8),
-    NoteIDs(String),
-    CardIDs(String),
+    NoteIds(String),
+    CardIds(String),
     Property {
         operator: String,
         kind: PropertyKind,
@@ -146,6 +174,36 @@ pub fn parse(input: &str) -> Result<Vec<Node>> {
         // unmatched ) is only char not consumed by any node parser
         Ok((remaining, _)) => Err(parse_failure(remaining, FailKind::UnopenedGroup).into()),
         Err(err) => Err(err.into()),
+    }
+}
+
+impl From<SearchNode> for Node {
+    fn from(n: SearchNode) -> Self {
+        Node::Search(n)
+    }
+}
+
+impl From<NotetypeId> for Node {
+    fn from(id: NotetypeId) -> Self {
+        Node::Search(SearchNode::NotetypeId(id))
+    }
+}
+
+impl From<TemplateKind> for Node {
+    fn from(k: TemplateKind) -> Self {
+        Node::Search(SearchNode::CardTemplate(k))
+    }
+}
+
+impl From<NoteId> for Node {
+    fn from(n: NoteId) -> Self {
+        Node::Search(SearchNode::NoteIds(format!("{}", n)))
+    }
+}
+
+impl From<StateKind> for Node {
+    fn from(k: StateKind) -> Self {
+        Node::Search(SearchNode::State(k))
     }
 }
 
@@ -325,7 +383,7 @@ fn search_node_for_text_with_argument<'a>(
 ) -> ParseResult<'a, SearchNode> {
     Ok(match key.to_ascii_lowercase().as_str() {
         "deck" => SearchNode::Deck(unescape(val)?),
-        "note" => SearchNode::NoteType(unescape(val)?),
+        "note" => SearchNode::Notetype(unescape(val)?),
         "tag" => SearchNode::Tag(unescape(val)?),
         "card" => parse_template(val)?,
         "flag" => parse_flag(val)?,
@@ -333,12 +391,13 @@ fn search_node_for_text_with_argument<'a>(
         "prop" => parse_prop(val)?,
         "added" => parse_added(val)?,
         "edited" => parse_edited(val)?,
+        "introduced" => parse_introduced(val)?,
         "rated" => parse_rated(val)?,
         "is" => parse_state(val)?,
         "did" => parse_did(val)?,
         "mid" => parse_mid(val)?,
-        "nid" => SearchNode::NoteIDs(check_id_list(val, key)?.into()),
-        "cid" => SearchNode::CardIDs(check_id_list(val, key)?.into()),
+        "nid" => SearchNode::NoteIds(check_id_list(val, key)?.into()),
+        "cid" => SearchNode::CardIds(check_id_list(val, key)?.into()),
         "re" => SearchNode::Regex(unescape_quotes(val)),
         "nc" => SearchNode::NoCombining(unescape(val)?),
         "w" => SearchNode::WordBoundary(unescape(val)?),
@@ -355,10 +414,10 @@ fn parse_template(s: &str) -> ParseResult<SearchNode> {
     }))
 }
 
-/// flag:0-4
+/// flag:0-7
 fn parse_flag(s: &str) -> ParseResult<SearchNode> {
     if let Ok(flag) = s.parse::<u8>() {
-        if flag > 4 {
+        if flag > 7 {
             Err(parse_failure(s, FailKind::InvalidFlag))
         } else {
             Ok(SearchNode::Flag(flag))
@@ -527,6 +586,11 @@ fn parse_edited(s: &str) -> ParseResult<SearchNode> {
     parse_u32(s, "edited:").map(|n| SearchNode::EditedInDays(n.max(1)))
 }
 
+/// eg introduced:1
+fn parse_introduced(s: &str) -> ParseResult<SearchNode> {
+    parse_u32(s, "introduced:").map(|n| SearchNode::IntroducedInDays(n.max(1)))
+}
+
 /// eg rated:3 or rated:10:2
 /// second arg must be between 1-4
 fn parse_rated(s: &str) -> ParseResult<SearchNode> {
@@ -553,11 +617,11 @@ fn parse_state(s: &str) -> ParseResult<SearchNode> {
 }
 
 fn parse_did(s: &str) -> ParseResult<SearchNode> {
-    parse_i64(s, "did:").map(|n| SearchNode::DeckID(n.into()))
+    parse_i64(s, "did:").map(|n| SearchNode::DeckIdWithoutChildren(n.into()))
 }
 
 fn parse_mid(s: &str) -> ParseResult<SearchNode> {
-    parse_i64(s, "mid:").map(|n| SearchNode::NoteTypeID(n.into()))
+    parse_i64(s, "mid:").map(|n| SearchNode::NotetypeId(n.into()))
 }
 
 /// ensure a list of ids contains only numbers and commas, returning unchanged if true
@@ -586,7 +650,7 @@ fn parse_dupe(s: &str) -> ParseResult<SearchNode> {
     let ntid = parse_i64(it.next().unwrap(), s)?;
     if let Some(text) = it.next() {
         Ok(SearchNode::Duplicates {
-            note_type_id: ntid.into(),
+            notetype_id: ntid.into(),
             text: unescape_quotes_and_backslashes(text),
         })
     } else {
@@ -696,9 +760,8 @@ fn is_parser_escape(txt: &str) -> bool {
 
 #[cfg(test)]
 mod test {
-    use crate::err::SearchErrorKind;
-
     use super::*;
+    use crate::error::SearchErrorKind;
 
     #[test]
     fn parsing() -> Result<()> {
@@ -829,11 +892,11 @@ mod test {
             vec![Search(Deck("default one".into()))]
         );
 
-        assert_eq!(parse("note:basic")?, vec![Search(NoteType("basic".into()))]);
+        assert_eq!(parse("note:basic")?, vec![Search(Notetype("basic".into()))]);
         assert_eq!(parse("tag:hard")?, vec![Search(Tag("hard".into()))]);
         assert_eq!(
             parse("nid:1237123712,2,3")?,
-            vec![Search(NoteIDs("1237123712,2,3".into()))]
+            vec![Search(NoteIds("1237123712,2,3".into()))]
         );
         assert_eq!(parse("is:due")?, vec![Search(State(StateKind::Due))]);
         assert_eq!(parse("flag:3")?, vec![Search(Flag(3))]);
@@ -857,9 +920,10 @@ mod test {
     }
 
     #[test]
-    fn errors() -> Result<()> {
-        use crate::err::AnkiError;
+    fn errors() {
         use FailKind::*;
+
+        use crate::error::AnkiError;
 
         fn assert_err_kind(input: &str, kind: FailKind) {
             assert_eq!(parse(input), Err(AnkiError::SearchError(kind)));
@@ -935,32 +999,57 @@ mod test {
         assert_err_kind(r#""flag: ""#, InvalidFlag);
         assert_err_kind("flag:-0", InvalidFlag);
         assert_err_kind("flag:", InvalidFlag);
-        assert_err_kind("flag:5", InvalidFlag);
+        assert_err_kind("flag:8", InvalidFlag);
         assert_err_kind("flag:1.1", InvalidFlag);
 
         for term in &["added", "edited", "rated", "resched"] {
-            assert!(
-                matches!(failkind(&format!("{}:1.1", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
-            );
-            assert!(
-                matches!(failkind(&format!("{}:-1", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
-            );
-            assert!(
-                matches!(failkind(&format!("{}:", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
-            );
-            assert!(
-                matches!(failkind(&format!("{}:foo", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
-            );
+            assert!(matches!(
+                failkind(&format!("{}:1.1", term)),
+                SearchErrorKind::InvalidPositiveWholeNumber { .. }
+            ));
+            assert!(matches!(
+                failkind(&format!("{}:-1", term)),
+                SearchErrorKind::InvalidPositiveWholeNumber { .. }
+            ));
+            assert!(matches!(
+                failkind(&format!("{}:", term)),
+                SearchErrorKind::InvalidPositiveWholeNumber { .. }
+            ));
+            assert!(matches!(
+                failkind(&format!("{}:foo", term)),
+                SearchErrorKind::InvalidPositiveWholeNumber { .. }
+            ));
         }
 
-        assert!(matches!(failkind("rated:1:"), SearchErrorKind::InvalidAnswerButton { .. }));
-        assert!(matches!(failkind("rated:2:-1"), SearchErrorKind::InvalidAnswerButton { .. }));
-        assert!(matches!(failkind("rated:3:1.1"), SearchErrorKind::InvalidAnswerButton { .. }));
-        assert!(matches!(failkind("rated:0:foo"), SearchErrorKind::InvalidAnswerButton { .. }));
+        assert!(matches!(
+            failkind("rated:1:"),
+            SearchErrorKind::InvalidAnswerButton { .. }
+        ));
+        assert!(matches!(
+            failkind("rated:2:-1"),
+            SearchErrorKind::InvalidAnswerButton { .. }
+        ));
+        assert!(matches!(
+            failkind("rated:3:1.1"),
+            SearchErrorKind::InvalidAnswerButton { .. }
+        ));
+        assert!(matches!(
+            failkind("rated:0:foo"),
+            SearchErrorKind::InvalidAnswerButton { .. }
+        ));
 
-        assert!(matches!(failkind("dupe:"), SearchErrorKind::InvalidWholeNumber { .. }));
-        assert!(matches!(failkind("dupe:1.1"), SearchErrorKind::InvalidWholeNumber { .. }));
-        assert!(matches!(failkind("dupe:foo"), SearchErrorKind::InvalidWholeNumber { .. }));
+        assert!(matches!(
+            failkind("dupe:"),
+            SearchErrorKind::InvalidWholeNumber { .. }
+        ));
+        assert!(matches!(
+            failkind("dupe:1.1"),
+            SearchErrorKind::InvalidWholeNumber { .. }
+        ));
+        assert!(matches!(
+            failkind("dupe:foo"),
+            SearchErrorKind::InvalidWholeNumber { .. }
+        ));
 
         assert_err_kind("prop:", InvalidPropProperty("".into()));
         assert_err_kind("prop:=1", InvalidPropProperty("=1".into()));
@@ -973,32 +1062,49 @@ mod test {
         // unsigned
 
         for term in &["ivl", "reps", "lapses", "pos"] {
-            assert!(
-                matches!(failkind(&format!("prop:{}>", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
-            );
-            assert!(
-                matches!(failkind(&format!("prop:{}=0.5", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
-            );
-            assert!(
-                matches!(failkind(&format!("prop:{}!=-1", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
-            );
-            assert!(
-                matches!(failkind(&format!("prop:{}<foo", term)), SearchErrorKind::InvalidPositiveWholeNumber { .. })
-            );
+            assert!(matches!(
+                failkind(&format!("prop:{}>", term)),
+                SearchErrorKind::InvalidPositiveWholeNumber { .. }
+            ));
+            assert!(matches!(
+                failkind(&format!("prop:{}=0.5", term)),
+                SearchErrorKind::InvalidPositiveWholeNumber { .. }
+            ));
+            assert!(matches!(
+                failkind(&format!("prop:{}!=-1", term)),
+                SearchErrorKind::InvalidPositiveWholeNumber { .. }
+            ));
+            assert!(matches!(
+                failkind(&format!("prop:{}<foo", term)),
+                SearchErrorKind::InvalidPositiveWholeNumber { .. }
+            ));
         }
 
         // signed
 
-        assert!(matches!(failkind("prop:due>"), SearchErrorKind::InvalidWholeNumber { .. }));
-        assert!(matches!(failkind("prop:due=0.5"), SearchErrorKind::InvalidWholeNumber { .. }));
+        assert!(matches!(
+            failkind("prop:due>"),
+            SearchErrorKind::InvalidWholeNumber { .. }
+        ));
+        assert!(matches!(
+            failkind("prop:due=0.5"),
+            SearchErrorKind::InvalidWholeNumber { .. }
+        ));
 
         // float
 
-        assert!(matches!(failkind("prop:ease>"), SearchErrorKind::InvalidNumber { .. }));
-        assert!(matches!(failkind("prop:ease!=one"), SearchErrorKind::InvalidNumber { .. }));
-        assert!(matches!(failkind("prop:ease<1,3"), SearchErrorKind::InvalidNumber { .. }));
-
-        Ok(())
+        assert!(matches!(
+            failkind("prop:ease>"),
+            SearchErrorKind::InvalidNumber { .. }
+        ));
+        assert!(matches!(
+            failkind("prop:ease!=one"),
+            SearchErrorKind::InvalidNumber { .. }
+        ));
+        assert!(matches!(
+            failkind("prop:ease<1,3"),
+            SearchErrorKind::InvalidNumber { .. }
+        ));
     }
 
     #[test]

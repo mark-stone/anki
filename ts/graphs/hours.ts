@@ -6,7 +6,7 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-import pb from "anki/backend_proto";
+import pb from "lib/backend_proto";
 import {
     interpolateBlues,
     select,
@@ -20,6 +20,7 @@ import {
     area,
     curveBasis,
 } from "d3";
+
 import { showTooltip, hideTooltip } from "./tooltip";
 import {
     GraphBounds,
@@ -27,9 +28,8 @@ import {
     GraphRange,
     millisecondCutoffForRange,
 } from "./graph-helpers";
-import type { I18n } from "anki/i18n";
-
-type ButtonCounts = [number, number, number, number];
+import { oddTickClass } from "./graph-styles";
+import * as tr from "lib/i18n";
 
 interface Hour {
     hour: number;
@@ -75,7 +75,6 @@ export function renderHours(
     svgElem: SVGElement,
     bounds: GraphBounds,
     origData: pb.BackendProto.GraphsOut,
-    i18n: I18n,
     range: GraphRange
 ): void {
     const data = gatherData(origData, range);
@@ -97,16 +96,13 @@ export function renderHours(
         .range([bounds.marginLeft, bounds.width - bounds.marginRight])
         .paddingInner(0.1);
     svg.select<SVGGElement>(".x-ticks")
-        .transition(trans)
-        .call(axisBottom(x).tickSizeOuter(0))
+        .call((selection) =>
+            selection.transition(trans).call(axisBottom(x).tickSizeOuter(0))
+        )
+        .selectAll(".tick")
         .selectAll("text")
-        .attr("class", (n: any) => {
-            if (n % 2 != 0) {
-                return "tick-odd";
-            } else {
-                return "";
-            }
-        });
+        .classed(oddTickClass, (d: any): boolean => d % 2 != 0)
+        .attr("direction", "ltr");
 
     const cappedRange = scaleLinear().range([0.1, 0.8]);
     const colour = scaleSequential((n) => interpolateBlues(cappedRange(n)!)).domain([
@@ -121,12 +117,14 @@ export function renderHours(
         .domain([0, yMax])
         .nice();
     svg.select<SVGGElement>(".y-ticks")
-        .transition(trans)
-        .call(
-            axisLeft(y)
-                .ticks(bounds.height / 50)
-                .tickSizeOuter(0)
-        );
+        .call((selection) =>
+            selection.transition(trans).call(
+                axisLeft(y)
+                    .ticks(bounds.height / 50)
+                    .tickSizeOuter(0)
+            )
+        )
+        .attr("direction", "ltr");
 
     const yArea = y.copy().domain([0, 1]);
 
@@ -163,15 +161,17 @@ export function renderHours(
         );
 
     svg.select<SVGGElement>(".y2-ticks")
-        .transition(trans)
-        .call(
-            axisRight(yArea)
-                .ticks(bounds.height / 50)
-                .tickFormat((n: any) => `${Math.round(n * 100)}%`)
-                .tickSizeOuter(0)
-        );
+        .call((selection) =>
+            selection.transition(trans).call(
+                axisRight(yArea)
+                    .ticks(bounds.height / 50)
+                    .tickFormat((n: any) => `${Math.round(n * 100)}%`)
+                    .tickSizeOuter(0)
+            )
+        )
+        .attr("direction", "ltr");
 
-    svg.select("path.area")
+    svg.select("path.cumulative-overlay")
         .datum(data)
         .attr(
             "d",
@@ -189,11 +189,11 @@ export function renderHours(
         );
 
     function tooltipText(d: Hour): string {
-        const hour = i18n.tr(i18n.TR.STATISTICS_HOURS_RANGE, {
+        const hour = tr.statisticsHoursRange({
             hourStart: d.hour,
             hourEnd: d.hour + 1,
         });
-        const correct = i18n.tr(i18n.TR.STATISTICS_HOURS_CORRECT, {
+        const correct = tr.statisticsHoursCorrect({
             correct: d.correctCount,
             total: d.totalCount,
             percent: d.totalCount ? (d.correctCount / d.totalCount) * 100 : 0,
@@ -202,7 +202,7 @@ export function renderHours(
     }
 
     // hover/tooltip
-    svg.select("g.hoverzone")
+    svg.select("g.hover-columns")
         .selectAll("rect")
         .data(data)
         .join("rect")

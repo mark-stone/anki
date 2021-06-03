@@ -3,21 +3,28 @@
 
 pub(crate) mod undo;
 
-use crate::err::{AnkiError, Result};
-use crate::notes::NoteID;
-use crate::{
-    collection::Collection, config::SchedulerVersion, timestamp::TimestampSecs, types::Usn,
-};
-use crate::{define_newtype, undo::UndoableOpKind};
-
-use crate::{deckconf::DeckConf, decks::DeckID};
-use num_enum::TryFromPrimitive;
-use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::collections::HashSet;
 
-define_newtype!(CardID, i64);
+use num_enum::TryFromPrimitive;
+use serde_repr::{Deserialize_repr, Serialize_repr};
 
-impl CardID {
+use crate::{
+    collection::Collection,
+    config::SchedulerVersion,
+    deckconfig::DeckConfig,
+    decks::DeckId,
+    define_newtype,
+    error::{AnkiError, FilteredDeckError, Result},
+    notes::NoteId,
+    ops::StateChanges,
+    prelude::*,
+    timestamp::TimestampSecs,
+    types::Usn,
+};
+
+define_newtype!(CardId, i64);
+
+impl CardId {
     pub fn as_secs(self) -> TimestampSecs {
         TimestampSecs(self.0 / 1000)
     }
@@ -53,9 +60,9 @@ pub enum CardQueue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
-    pub(crate) id: CardID,
-    pub(crate) note_id: NoteID,
-    pub(crate) deck_id: DeckID,
+    pub(crate) id: CardId,
+    pub(crate) note_id: NoteId,
+    pub(crate) deck_id: DeckId,
     pub(crate) template_idx: u16,
     pub(crate) mtime: TimestampSecs,
     pub(crate) usn: Usn,
@@ -68,7 +75,7 @@ pub struct Card {
     pub(crate) lapses: u32,
     pub(crate) remaining_steps: u32,
     pub(crate) original_due: i32,
-    pub(crate) original_deck_id: DeckID,
+    pub(crate) original_deck_id: DeckId,
     pub(crate) flags: u8,
     pub(crate) data: String,
 }
@@ -76,9 +83,9 @@ pub struct Card {
 impl Default for Card {
     fn default() -> Self {
         Self {
-            id: CardID(0),
-            note_id: NoteID(0),
-            deck_id: DeckID(0),
+            id: CardId(0),
+            note_id: NoteId(0),
+            deck_id: DeckId(0),
             template_idx: 0,
             mtime: TimestampSecs(0),
             usn: Usn(0),
@@ -91,7 +98,7 @@ impl Default for Card {
             lapses: 0,
             remaining_steps: 0,
             original_due: 0,
-            original_deck_id: DeckID(0),
+            original_deck_id: DeckId(0),
             flags: 0,
             data: "".to_string(),
         }
@@ -105,9 +112,22 @@ impl Card {
     }
 
     /// Caller must ensure provided deck exists and is not filtered.
-    fn set_deck(&mut self, deck: DeckID, sched: SchedulerVersion) {
+    fn set_deck(&mut self, deck: DeckId, sched: SchedulerVersion) {
         self.remove_from_filtered_deck_restoring_queue(sched);
         self.deck_id = deck;
+    }
+
+    /// True if flag changed.
+    fn set_flag(&mut self, flag: u8) -> bool {
+        // The first 3 bits represent one of the 7 supported flags, the rest of
+        // the flag byte is preserved.
+        let updated_flags = (self.flags & !0b111) | flag;
+        if self.flags != updated_flags {
+            self.flags = updated_flags;
+            true
+        } else {
+            false
+        }
     }
 
     /// Return the total number of steps left to do, ignoring the
@@ -127,7 +147,7 @@ impl Card {
 }
 
 impl Card {
-    pub fn new(note_id: NoteID, template_idx: u16, deck_id: DeckID, due: i32) -> Self {
+    pub fn new(note_id: NoteId, template_idx: u16, deck_id: DeckId, due: i32) -> Self {
         Card {
             note_id,
             template_idx,
@@ -139,17 +159,35 @@ impl Card {
 }
 
 impl Collection {
-    pub(crate) fn update_card_with_op(
+    pub(crate) fn update_card_maybe_undoable(
         &mut self,
         card: &mut Card,
-        op: Option<UndoableOpKind>,
-    ) -> Result<()> {
+        undoable: bool,
+    ) -> Result<OpOutput<()>> {
         let existing = self.storage.get_card(card.id)?.ok_or(AnkiError::NotFound)?;
-        self.transact(op, |col| col.update_card_inner(card, &existing, col.usn()?))
+        if undoable {
+            self.transact(Op::UpdateCard, |col| {
+                col.update_card_inner(card, existing, col.usn()?)
+            })
+        } else {
+            self.transact_no_undo(|col| {
+                col.update_card_inner(card, existing, col.usn()?)?;
+                Ok(OpOutput {
+                    output: (),
+                    changes: OpChanges {
+                        op: Op::UpdateCard,
+                        changes: StateChanges {
+                            card: true,
+                            ..Default::default()
+                        },
+                    },
+                })
+            })
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn get_and_update_card<F, T>(&mut self, cid: CardID, func: F) -> Result<Card>
+    pub(crate) fn get_and_update_card<F, T>(&mut self, cid: CardId, func: F) -> Result<Card>
     where
         F: FnOnce(&mut Card) -> Result<T>,
     {
@@ -159,7 +197,7 @@ impl Collection {
             .ok_or_else(|| AnkiError::invalid_input("no such card"))?;
         let mut card = orig.clone();
         func(&mut card)?;
-        self.update_card_inner(&mut card, &orig, self.usn()?)?;
+        self.update_card_inner(&mut card, orig, self.usn()?)?;
         Ok(card)
     }
 
@@ -167,7 +205,7 @@ impl Collection {
     pub(crate) fn update_card_inner(
         &mut self,
         card: &mut Card,
-        original: &Card,
+        original: Card,
         usn: Usn,
     ) -> Result<()> {
         card.set_modified(usn);
@@ -185,7 +223,7 @@ impl Collection {
 
     /// Remove cards and any resulting orphaned notes.
     /// Expects a transaction.
-    pub(crate) fn remove_cards_and_orphaned_notes(&mut self, cids: &[CardID]) -> Result<()> {
+    pub(crate) fn remove_cards_and_orphaned_notes(&mut self, cids: &[CardId]) -> Result<()> {
         let usn = self.usn()?;
         let mut nids = HashSet::new();
         for cid in cids {
@@ -203,36 +241,59 @@ impl Collection {
         Ok(())
     }
 
-    pub fn set_deck(&mut self, cards: &[CardID], deck_id: DeckID) -> Result<()> {
+    pub fn set_deck(&mut self, cards: &[CardId], deck_id: DeckId) -> Result<OpOutput<usize>> {
         let deck = self.get_deck(deck_id)?.ok_or(AnkiError::NotFound)?;
         if deck.is_filtered() {
-            return Err(AnkiError::DeckIsFiltered);
+            return Err(FilteredDeckError::CanNotMoveCardsInto.into());
         }
         self.storage.set_search_table_to_card_ids(cards, false)?;
         let sched = self.scheduler_version();
         let usn = self.usn()?;
-        self.transact(None, |col| {
+        self.transact(Op::SetCardDeck, |col| {
+            let mut count = 0;
             for mut card in col.storage.all_searched_cards()? {
                 if card.deck_id == deck_id {
                     continue;
                 }
+                count += 1;
                 let original = card.clone();
                 card.set_deck(deck_id, sched);
-                col.update_card_inner(&mut card, &original, usn)?;
+                col.update_card_inner(&mut card, original, usn)?;
             }
-            Ok(())
+            Ok(count)
+        })
+    }
+
+    pub fn set_card_flag(&mut self, cards: &[CardId], flag: u32) -> Result<OpOutput<usize>> {
+        if flag > 7 {
+            return Err(AnkiError::invalid_input("invalid flag"));
+        }
+        let flag = flag as u8;
+
+        self.storage.set_search_table_to_card_ids(cards, false)?;
+        let usn = self.usn()?;
+        self.transact(Op::SetFlag, |col| {
+            let mut count = 0;
+            for mut card in col.storage.all_searched_cards()? {
+                let original = card.clone();
+                if card.set_flag(flag) {
+                    col.update_card_inner(&mut card, original, usn)?;
+                    count += 1;
+                }
+            }
+            Ok(count)
         })
     }
 
     /// Get deck config for the given card. If missing, return default values.
     #[allow(dead_code)]
-    pub(crate) fn deck_config_for_card(&mut self, card: &Card) -> Result<DeckConf> {
+    pub(crate) fn deck_config_for_card(&mut self, card: &Card) -> Result<DeckConfig> {
         if let Some(deck) = self.get_deck(card.original_or_current_deck_id())? {
             if let Some(conf_id) = deck.config_id() {
                 return Ok(self.get_deck_config(conf_id, true)?.unwrap());
             }
         }
 
-        Ok(DeckConf::default())
+        Ok(DeckConfig::default())
     }
 }

@@ -1,17 +1,17 @@
 load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
 load("@bazel_skylib//lib:versions.bzl", "versions")
-load("@io_bazel_rules_rust//rust:repositories.bzl", "rust_repositories")
+load("@rules_rust//rust:repositories.bzl", "rust_repositories")
 load("@net_ankiweb_anki//cargo:crates.bzl", "raze_fetch_remote_crates")
 load(":python.bzl", "setup_local_python")
 load(":protobuf.bzl", "setup_protobuf_binary")
 load("//rslib:clang_format.bzl", "setup_clang_format")
 load("@build_bazel_rules_nodejs//:index.bzl", "node_repositories", "yarn_install")
 load("@io_bazel_rules_sass//:defs.bzl", "sass_repositories")
-load("@build_bazel_rules_svelte//:defs.bzl", "rules_svelte_dependencies")
 load("@com_github_ali5h_rules_pip//:defs.bzl", "pip_import")
 load("//pip/pyqt5:defs.bzl", "install_pyqt5")
+load("@esbuild_toolchain//:esbuild_repo.bzl", "esbuild_dependencies")
 
-anki_version = "2.1.43"
+anki_version = "2.1.45"
 
 def setup_deps():
     bazel_skylib_workspace()
@@ -20,7 +20,7 @@ def setup_deps():
 
     rust_repositories(
         edition = "2018",
-        version = "1.48.0",
+        version = "1.51.0",
     )
 
     raze_fetch_remote_crates()
@@ -54,4 +54,4 @@ def setup_deps():
 
     sass_repositories()
 
-    rules_svelte_dependencies()
+    esbuild_dependencies()

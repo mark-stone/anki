@@ -12,20 +12,19 @@ pub(crate) mod rescheduling_filter;
 pub(crate) mod review;
 pub(crate) mod steps;
 
-use rand::prelude::*;
-use rand::rngs::StdRng;
-
-pub use {
-    filtered::FilteredState, learning::LearnState, new::NewState, normal::NormalState,
-    preview_filter::PreviewState, relearning::RelearnState,
-    rescheduling_filter::ReschedulingFilterState, review::ReviewState,
-};
-
+pub use filtered::FilteredState;
 pub(crate) use interval_kind::IntervalKind;
-
-use crate::revlog::RevlogReviewKind;
+pub use learning::LearnState;
+pub use new::NewState;
+pub use normal::NormalState;
+pub use preview_filter::PreviewState;
+use rand::{prelude::*, rngs::StdRng};
+pub use relearning::RelearnState;
+pub use rescheduling_filter::ReschedulingFilterState;
+pub use review::ReviewState;
 
 use self::steps::LearningSteps;
+use crate::revlog::RevlogReviewKind;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CardState {
@@ -122,21 +121,6 @@ impl<'a> StateContext<'a> {
         .round() as u32
     }
 
-    /// Add up to 25% increase to seconds, but no more than 5 minutes.
-    pub(crate) fn with_learning_fuzz(&self, secs: u32) -> u32 {
-        if let Some(seed) = self.fuzz_seed {
-            let mut rng = StdRng::seed_from_u64(seed);
-            let upper_exclusive = secs + ((secs as f32) * 0.25).min(300.0).floor() as u32;
-            if secs >= upper_exclusive {
-                secs
-            } else {
-                rng.gen_range(secs, upper_exclusive)
-            }
-        } else {
-            secs
-        }
-    }
-
     pub(crate) fn fuzzed_graduating_interval_good(&self) -> u32 {
         self.with_review_fuzz(self.graduating_interval_good as f32)
     }
@@ -151,7 +135,7 @@ fn fuzz_range(interval: f32, factor: f32, minimum: f32) -> (f32, f32) {
     (interval - delta, interval + delta + 1.0)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NextCardStates {
     pub current: CardState,
     pub again: CardState,

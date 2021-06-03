@@ -8,8 +8,8 @@ pub(crate) enum UndoableCardChange {
     Added(Box<Card>),
     Updated(Box<Card>),
     Removed(Box<Card>),
-    GraveAdded(Box<(CardID, Usn)>),
-    GraveRemoved(Box<(CardID, Usn)>),
+    GraveAdded(Box<(CardId, Usn)>),
+    GraveRemoved(Box<(CardId, Usn)>),
 }
 
 impl Collection {
@@ -21,7 +21,7 @@ impl Collection {
                     .storage
                     .get_card(card.id)?
                     .ok_or_else(|| AnkiError::invalid_input("card disappeared"))?;
-                self.update_card_undoable(&mut *card, &current)
+                self.update_card_undoable(&mut *card, current)
             }
             UndoableCardChange::Removed(card) => self.restore_deleted_card(*card),
             UndoableCardChange::GraveAdded(e) => self.remove_card_grave(e.0, e.1),
@@ -35,11 +35,11 @@ impl Collection {
         Ok(())
     }
 
-    pub(super) fn update_card_undoable(&mut self, card: &mut Card, original: &Card) -> Result<()> {
+    pub(super) fn update_card_undoable(&mut self, card: &mut Card, original: Card) -> Result<()> {
         if card.id.0 == 0 {
             return Err(AnkiError::invalid_input("card id not set"));
         }
-        self.save_undo(UndoableCardChange::Updated(Box::new(original.clone())));
+        self.save_undo(UndoableCardChange::Updated(Box::new(original)));
         self.storage.update_card(card)
     }
 
@@ -66,12 +66,12 @@ impl Collection {
         Ok(())
     }
 
-    fn add_card_grave_undoable(&mut self, cid: CardID, usn: Usn) -> Result<()> {
+    fn add_card_grave_undoable(&mut self, cid: CardId, usn: Usn) -> Result<()> {
         self.save_undo(UndoableCardChange::GraveAdded(Box::new((cid, usn))));
         self.storage.add_card_grave(cid, usn)
     }
 
-    fn remove_card_grave(&mut self, cid: CardID, usn: Usn) -> Result<()> {
+    fn remove_card_grave(&mut self, cid: CardId, usn: Usn) -> Result<()> {
         self.save_undo(UndoableCardChange::GraveRemoved(Box::new((cid, usn))));
         self.storage.remove_card_grave(cid)
     }

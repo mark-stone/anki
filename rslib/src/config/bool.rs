@@ -1,14 +1,17 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::prelude::*;
 use serde_aux::field_attributes::deserialize_bool_from_anything;
 use serde_derive::Deserialize;
 use strum::IntoStaticStr;
 
+use crate::prelude::*;
+
 #[derive(Debug, Clone, Copy, IntoStaticStr)]
 #[strum(serialize_all = "camelCase")]
 pub enum BoolKey {
+    BrowserTableShowNotesMode,
+    BrowserNoteSortBackwards,
     CardCountsSeparateInactive,
     CollapseCardState,
     CollapseDecks,
@@ -45,7 +48,7 @@ pub enum BoolKey {
 struct BoolLike(#[serde(deserialize_with = "deserialize_bool_from_anything")] bool);
 
 impl Collection {
-    pub(crate) fn get_bool(&self, key: BoolKey) -> bool {
+    pub fn get_config_bool(&self, key: BoolKey) -> bool {
         match key {
             BoolKey::BrowserSortBackwards => {
                 // older clients were storing this as an int
@@ -67,7 +70,24 @@ impl Collection {
         }
     }
 
-    pub(crate) fn set_bool(&mut self, key: BoolKey, value: bool) -> Result<()> {
+    pub fn set_config_bool(
+        &mut self,
+        key: BoolKey,
+        value: bool,
+        undoable: bool,
+    ) -> Result<OpOutput<()>> {
+        self.transact(Op::UpdateConfig, |col| {
+            col.set_config(key, &value)?;
+            if !undoable {
+                col.clear_current_undo_step_changes()?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Collection {
+    pub(crate) fn set_config_bool_inner(&mut self, key: BoolKey, value: bool) -> Result<bool> {
         self.set_config(key, &value)
     }
 }

@@ -6,7 +6,8 @@
 @typescript-eslint/no-explicit-any: "off",
  */
 
-import pb from "anki/backend_proto";
+import pb from "lib/backend_proto";
+
 import {
     interpolateRdYlGn,
     select,
@@ -25,7 +26,7 @@ import {
     GraphRange,
     millisecondCutoffForRange,
 } from "./graph-helpers";
-import type { I18n } from "anki/i18n";
+import * as tr from "lib/i18n";
 
 type ButtonCounts = [number, number, number, number];
 
@@ -99,7 +100,6 @@ export function renderButtons(
     svgElem: SVGElement,
     bounds: GraphBounds,
     origData: pb.BackendProto.GraphsOut,
-    i18n: I18n,
     range: GraphRange
 ): void {
     const sourceData = gatherData(origData, range);
@@ -154,27 +154,29 @@ export function renderButtons(
         .domain(["learning", "young", "mature"])
         .range([bounds.marginLeft, bounds.width - bounds.marginRight]);
     svg.select<SVGGElement>(".x-ticks")
-        .transition(trans)
-        .call(
-            axisBottom(xGroup)
-                .tickFormat(((d: GroupKind) => {
-                    let kind: string;
-                    switch (d) {
-                        case "learning":
-                            kind = i18n.tr(i18n.TR.STATISTICS_COUNTS_LEARNING_CARDS);
-                            break;
-                        case "young":
-                            kind = i18n.tr(i18n.TR.STATISTICS_COUNTS_YOUNG_CARDS);
-                            break;
-                        case "mature":
-                        default:
-                            kind = i18n.tr(i18n.TR.STATISTICS_COUNTS_MATURE_CARDS);
-                            break;
-                    }
-                    return `${kind} \u200e(${totalCorrect(d).percent}%)`;
-                }) as any)
-                .tickSizeOuter(0)
-        );
+        .call((selection) =>
+            selection.transition(trans).call(
+                axisBottom(xGroup)
+                    .tickFormat(((d: GroupKind) => {
+                        let kind: string;
+                        switch (d) {
+                            case "learning":
+                                kind = tr.statisticsCountsLearningCards();
+                                break;
+                            case "young":
+                                kind = tr.statisticsCountsYoungCards();
+                                break;
+                            case "mature":
+                            default:
+                                kind = tr.statisticsCountsMatureCards();
+                                break;
+                        }
+                        return `${kind} \u200e(${totalCorrect(d).percent}%)`;
+                    }) as any)
+                    .tickSizeOuter(0)
+            )
+        )
+        .attr("direction", "ltr");
 
     const xButton = scaleBand()
         .domain(["1", "2", "3", "4"])
@@ -190,12 +192,14 @@ export function renderButtons(
         .range([bounds.height - bounds.marginBottom, bounds.marginTop])
         .domain([0, yMax]);
     svg.select<SVGGElement>(".y-ticks")
-        .transition(trans)
-        .call(
-            axisLeft(y)
-                .ticks(bounds.height / 50)
-                .tickSizeOuter(0)
-        );
+        .call((selection) =>
+            selection.transition(trans).call(
+                axisLeft(y)
+                    .ticks(bounds.height / 50)
+                    .tickSizeOuter(0)
+            )
+        )
+        .attr("direction", "ltr");
 
     // x bars
 
@@ -239,16 +243,13 @@ export function renderButtons(
     // hover/tooltip
 
     function tooltipText(d: Datum): string {
-        const button = i18n.tr(i18n.TR.STATISTICS_ANSWER_BUTTONS_BUTTON_NUMBER);
-        const timesPressed = i18n.tr(i18n.TR.STATISTICS_ANSWER_BUTTONS_BUTTON_PRESSED);
-        const correctStr = i18n.tr(
-            i18n.TR.STATISTICS_HOURS_CORRECT,
-            totalCorrect(d.group)
-        );
+        const button = tr.statisticsAnswerButtonsButtonNumber();
+        const timesPressed = tr.statisticsAnswerButtonsButtonPressed();
+        const correctStr = tr.statisticsHoursCorrect(totalCorrect(d.group));
         return `${button}: ${d.buttonNum}<br>${timesPressed}: ${d.count}<br>${correctStr}`;
     }
 
-    svg.select("g.hoverzone")
+    svg.select("g.hover-columns")
         .selectAll("rect")
         .data(data)
         .join("rect")

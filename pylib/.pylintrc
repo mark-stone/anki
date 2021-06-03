@@ -4,11 +4,19 @@ persistent = no
 
 [TYPECHECK]
 ignored-classes=
+  BrowserColumns,
+  BrowserRow,
   FormatTimespanIn,
-  AnswerCardIn,
-  UnburyCardsInCurrentDeckIn,
+  CardAnswer,
+  QueuedCards,
+  UnburyDeckIn,
   BuryOrSuspendCardsIn,
-  NoteIsDuplicateOrEmptyOut
+  NoteIsDuplicateOrEmptyOut,
+  BackendError,
+  SetDeckCollapsedIn,
+
+[REPORTS]
+output-format=colorized
 
 [MESSAGES CONTROL]
 disable=C,R,

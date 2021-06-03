@@ -3,10 +3,9 @@
 
 /* eslint
 @typescript-eslint/no-non-null-assertion: "off",
-@typescript-eslint/no-explicit-any: "off",
  */
 
-import pb from "anki/backend_proto";
+import pb from "lib/backend_proto";
 import {
     interpolateBlues,
     select,
@@ -21,6 +20,7 @@ import {
     timeSaturday,
 } from "d3";
 import type { CountableTimeInterval } from "d3";
+
 import { showTooltip, hideTooltip } from "./tooltip";
 import {
     GraphBounds,
@@ -28,7 +28,9 @@ import {
     RevlogRange,
     SearchDispatch,
 } from "./graph-helpers";
-import type { I18n } from "anki/i18n";
+import { clickableClass } from "./graph-styles";
+import { i18n } from "lib/i18n";
+import * as tr from "lib/i18n";
 
 export interface GraphData {
     // indexed by day, where day is relative to today
@@ -67,15 +69,7 @@ export function gatherData(
         reviewCount.set(day, count + 1);
     }
 
-    const timeFunction =
-        firstDayOfWeek === Weekday.MONDAY
-            ? timeMonday
-            : firstDayOfWeek === Weekday.FRIDAY
-            ? timeFriday
-            : firstDayOfWeek === Weekday.SATURDAY
-            ? timeSaturday
-            : timeSunday;
-
+    const timeFunction = timeFunctionForDay(firstDayOfWeek);
     const weekdayLabels: number[] = [];
     for (let i = 0; i < 7; i++) {
         weekdayLabels.push((firstDayOfWeek + i) % 7);
@@ -90,7 +84,6 @@ export function renderCalendar(
     sourceData: GraphData,
     dispatch: SearchDispatch,
     targetYear: number,
-    i18n: I18n,
     nightMode: boolean,
     revlogRange: RevlogRange,
     setFirstDayOfWeek: (d: number) => void
@@ -168,7 +161,7 @@ export function renderCalendar(
             month: "long",
             day: "numeric",
         });
-        const cards = i18n.tr(i18n.TR.STATISTICS_REVIEWS, { reviews: d.count });
+        const cards = tr.statisticsReviews({ reviews: d.count });
         return `${date}<br>${cards}`;
     }
 
@@ -189,6 +182,7 @@ export function renderCalendar(
         .attr("text-anchor", "end")
         .attr("font-size", "small")
         .attr("font-family", "monospace")
+        .attr("direction", "ltr")
         .style("user-select", "none")
         .on("click", null)
         .filter((d: number) =>
@@ -203,24 +197,35 @@ export function renderCalendar(
         .data(data)
         .join("rect")
         .attr("fill", emptyColour)
-        .attr("width", (d) => x(d.weekNumber + 1)! - x(d.weekNumber)! - 2)
+        .attr("width", (d: DayDatum) => x(d.weekNumber + 1)! - x(d.weekNumber)! - 2)
         .attr("height", height - 2)
-        .attr("x", (d) => x(d.weekNumber + 1)!)
-        .attr("y", (d) => bounds.marginTop + d.weekDay * height)
+        .attr("x", (d: DayDatum) => x(d.weekNumber + 1)!)
+        .attr("y", (d: DayDatum) => bounds.marginTop + d.weekDay * height)
         .on("mousemove", (event: MouseEvent, d: DayDatum) => {
             const [x, y] = pointer(event, document.body);
             showTooltip(tooltipText(d), x, y);
         })
         .on("mouseout", hideTooltip)
-        .attr("class", (d: any): string => {
-            return d.count > 0 ? "clickable" : "";
-        })
-        .on("click", function (_event: MouseEvent, d: any) {
+        .attr("class", (d: DayDatum): string => (d.count > 0 ? clickableClass : ""))
+        .on("click", function (_event: MouseEvent, d: DayDatum) {
             if (d.count > 0) {
                 dispatch("search", { query: `"prop:rated=${d.day}"` });
             }
         })
         .transition()
         .duration(800)
-        .attr("fill", (d) => (d.count === 0 ? emptyColour : blues(d.count)!));
+        .attr("fill", (d: DayDatum) => (d.count === 0 ? emptyColour : blues(d.count)!));
+}
+
+function timeFunctionForDay(firstDayOfWeek: WeekdayType): CountableTimeInterval {
+    switch (firstDayOfWeek) {
+        case Weekday.MONDAY:
+            return timeMonday;
+        case Weekday.FRIDAY:
+            return timeFriday;
+        case Weekday.SATURDAY:
+            return timeSaturday;
+        default:
+            return timeSunday;
+    }
 }

@@ -37,7 +37,7 @@ from anki import hooks
 from anki.cards import Card
 from anki.decks import DeckManager
 from anki.errors import TemplateError
-from anki.models import NoteType
+from anki.models import NotetypeDict
 from anki.notes import Note
 from anki.sound import AVTag, SoundOrVideoTag, TTSTag
 from anki.utils import to_json_bytes
@@ -61,13 +61,15 @@ TemplateReplacementList = List[Union[str, TemplateReplacement]]
 class PartiallyRenderedCard:
     qnodes: TemplateReplacementList
     anodes: TemplateReplacementList
+    css: str
+    latex_svg: bool
 
     @classmethod
     def from_proto(cls, out: _pb.RenderCardOut) -> PartiallyRenderedCard:
         qnodes = cls.nodes_from_proto(out.question_nodes)
         anodes = cls.nodes_from_proto(out.answer_nodes)
 
-        return PartiallyRenderedCard(qnodes, anodes)
+        return PartiallyRenderedCard(qnodes, anodes, out.css, out.latex_svg)
 
     @staticmethod
     def nodes_from_proto(
@@ -121,7 +123,7 @@ class TemplateRenderContext:
         cls,
         note: Note,
         card: Card,
-        notetype: NoteType,
+        notetype: NotetypeDict,
         template: Dict,
         fill_empty: bool,
     ) -> TemplateRenderContext:
@@ -140,7 +142,7 @@ class TemplateRenderContext:
         card: Card,
         note: Note,
         browser: bool = False,
-        notetype: NoteType = None,
+        notetype: NotetypeDict = None,
         template: Optional[Dict] = None,
         fill_empty: bool = False,
     ) -> None:
@@ -151,6 +153,7 @@ class TemplateRenderContext:
         self._template = template
         self._fill_empty = fill_empty
         self._fields: Optional[Dict] = None
+        self._latex_svg = False
         if not notetype:
             self._note_type = note.model()
         else:
@@ -172,7 +175,7 @@ class TemplateRenderContext:
             # add (most) special fields
             fields["Tags"] = self._note.stringTags().strip()
             fields["Type"] = self._note_type["name"]
-            fields["Deck"] = self._col.decks.name(self._card.odid or self._card.did)
+            fields["Deck"] = self._col.decks.name(self._card.current_deck_id())
             fields["Subdeck"] = DeckManager.basename(fields["Deck"])
             if self._template:
                 fields["Card"] = self._template["name"]
@@ -194,8 +197,11 @@ class TemplateRenderContext:
     def note(self) -> Note:
         return self._note
 
-    def note_type(self) -> NoteType:
+    def note_type(self) -> NotetypeDict:
         return self._note_type
+
+    def latex_svg(self) -> bool:
+        return self._latex_svg
 
     # legacy
     def qfmt(self) -> str:
@@ -227,8 +233,10 @@ class TemplateRenderContext:
             answer_text=aout.text,
             question_av_tags=av_tags_to_native(qout.av_tags),
             answer_av_tags=av_tags_to_native(aout.av_tags),
-            css=self.note_type()["css"],
+            css=partial.css,
         )
+
+        self._latex_svg = partial.latex_svg
 
         if not self._browser:
             hooks.card_did_render(output, self)
@@ -238,12 +246,15 @@ class TemplateRenderContext:
     def _partially_render(self) -> PartiallyRenderedCard:
         if self._template:
             # card layout screen
-            out = self._col._backend.render_uncommitted_card(
+            out = self._col._backend.render_uncommitted_card_legacy(
                 note=self._note._to_backend_note(),
                 card_ord=self._card.ord,
                 template=to_json_bytes(self._template),
                 fill_empty=self._fill_empty,
             )
+            # when rendering card layout, the css changes have not been
+            # committed; we need the current notetype instance instead
+            out.css = self._note_type["css"]
         else:
             # existing card (eg study mode)
             out = self._col._backend.render_existing_card(

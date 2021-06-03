@@ -1,12 +1,15 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::{
-    decks::DeckID as DeckIDType,
-    notetype::NoteTypeID as NoteTypeIDType,
-    search::parser::{Node, PropertyKind, RatingKind, SearchNode, StateKind, TemplateKind},
-};
 use std::mem;
+
+use crate::{
+    decks::DeckId as DeckIdType,
+    notetype::NotetypeId as NotetypeIdType,
+    prelude::*,
+    search::parser::{parse, Node, PropertyKind, RatingKind, SearchNode, StateKind, TemplateKind},
+    text::escape_anki_wildcards,
+};
 
 #[derive(Debug, PartialEq)]
 pub enum BoolSeparator {
@@ -66,7 +69,7 @@ pub fn write_nodes(nodes: &[Node]) -> String {
 fn write_node(node: &Node) -> String {
     use Node::*;
     match node {
-        And => " AND ".to_string(),
+        And => " ".to_string(),
         Or => " OR ".to_string(),
         Not(n) => format!("-{}", write_node(n)),
         Group(ns) => format!("({})", write_nodes(ns)),
@@ -77,33 +80,40 @@ fn write_node(node: &Node) -> String {
 fn write_search_node(node: &SearchNode) -> String {
     use SearchNode::*;
     match node {
-        UnqualifiedText(s) => quote(&s.replace(":", "\\:")),
+        UnqualifiedText(s) => maybe_quote(&s.replace(":", "\\:")),
         SingleField { field, text, is_re } => write_single_field(field, text, *is_re),
-        AddedInDays(u) => format!("\"added:{}\"", u),
-        EditedInDays(u) => format!("\"edited:{}\"", u),
+        AddedInDays(u) => format!("added:{}", u),
+        EditedInDays(u) => format!("edited:{}", u),
+        IntroducedInDays(u) => format!("introduced:{}", u),
         CardTemplate(t) => write_template(t),
-        Deck(s) => quote(&format!("deck:{}", s)),
-        DeckID(DeckIDType(i)) => format!("\"did:{}\"", i),
-        NoteTypeID(NoteTypeIDType(i)) => format!("\"mid:{}\"", i),
-        NoteType(s) => quote(&format!("note:{}", s)),
+        Deck(s) => maybe_quote(&format!("deck:{}", s)),
+        DeckIdWithoutChildren(DeckIdType(i)) => format!("did:{}", i),
+        // not exposed on the GUI end
+        DeckIdWithChildren(_) => "".to_string(),
+        NotetypeId(NotetypeIdType(i)) => format!("mid:{}", i),
+        Notetype(s) => maybe_quote(&format!("note:{}", s)),
         Rated { days, ease } => write_rated(days, ease),
-        Tag(s) => quote(&format!("tag:{}", s)),
-        Duplicates { note_type_id, text } => write_dupe(note_type_id, text),
+        Tag(s) => maybe_quote(&format!("tag:{}", s)),
+        Duplicates { notetype_id, text } => write_dupe(notetype_id, text),
         State(k) => write_state(k),
-        Flag(u) => format!("\"flag:{}\"", u),
-        NoteIDs(s) => format!("\"nid:{}\"", s),
-        CardIDs(s) => format!("\"cid:{}\"", s),
+        Flag(u) => format!("flag:{}", u),
+        NoteIds(s) => format!("nid:{}", s),
+        CardIds(s) => format!("cid:{}", s),
         Property { operator, kind } => write_property(operator, kind),
-        WholeCollection => "\"deck:*\"".to_string(),
-        Regex(s) => quote(&format!("re:{}", s)),
-        NoCombining(s) => quote(&format!("nc:{}", s)),
-        WordBoundary(s) => quote(&format!("w:{}", s)),
+        WholeCollection => "deck:*".to_string(),
+        Regex(s) => maybe_quote(&format!("re:{}", s)),
+        NoCombining(s) => maybe_quote(&format!("nc:{}", s)),
+        WordBoundary(s) => maybe_quote(&format!("w:{}", s)),
     }
 }
 
-/// Escape and wrap in double quotes.
-fn quote(txt: &str) -> String {
-    format!("\"{}\"", txt.replace("\"", "\\\""))
+/// Escape double quotes and wrap in double quotes if necessary.
+fn maybe_quote(txt: &str) -> String {
+    if txt.chars().any(|c| " \u{3000}()".contains(c)) {
+        format!("\"{}\"", txt.replace("\"", "\\\""))
+    } else {
+        txt.replace("\"", "\\\"")
+    }
 }
 
 fn write_single_field(field: &str, text: &str, is_re: bool) -> String {
@@ -113,35 +123,35 @@ fn write_single_field(field: &str, text: &str, is_re: bool) -> String {
     } else {
         text.to_string()
     };
-    quote(&format!("{}:{}{}", field.replace(":", "\\:"), re, &text))
+    maybe_quote(&format!("{}:{}{}", field.replace(":", "\\:"), re, &text))
 }
 
 fn write_template(template: &TemplateKind) -> String {
     match template {
-        TemplateKind::Ordinal(u) => format!("\"card:{}\"", u + 1),
-        TemplateKind::Name(s) => format!("\"card:{}\"", s),
+        TemplateKind::Ordinal(u) => format!("card:{}", u + 1),
+        TemplateKind::Name(s) => maybe_quote(&format!("card:{}", s)),
     }
 }
 
 fn write_rated(days: &u32, ease: &RatingKind) -> String {
     use RatingKind::*;
     match ease {
-        AnswerButton(n) => format!("\"rated:{}:{}\"", days, n),
-        AnyAnswerButton => format!("\"rated:{}\"", days),
-        ManualReschedule => format!("\"resched:{}\"", days),
+        AnswerButton(n) => format!("rated:{}:{}", days, n),
+        AnyAnswerButton => format!("rated:{}", days),
+        ManualReschedule => format!("resched:{}", days),
     }
 }
 
 /// Escape double quotes and backslashes: \"
-fn write_dupe(note_type_id: &NoteTypeIDType, text: &str) -> String {
+fn write_dupe(notetype_id: &NotetypeId, text: &str) -> String {
     let esc = text.replace(r"\", r"\\").replace('"', r#"\""#);
-    format!("\"dupe:{},{}\"", note_type_id, esc)
+    maybe_quote(&format!("dupe:{},{}", notetype_id, esc))
 }
 
 fn write_state(kind: &StateKind) -> String {
     use StateKind::*;
     format!(
-        "\"is:{}\"",
+        "is:{}",
         match kind {
             New => "new",
             Review => "review",
@@ -158,58 +168,57 @@ fn write_state(kind: &StateKind) -> String {
 fn write_property(operator: &str, kind: &PropertyKind) -> String {
     use PropertyKind::*;
     match kind {
-        Due(i) => format!("\"prop:due{}{}\"", operator, i),
-        Interval(u) => format!("\"prop:ivl{}{}\"", operator, u),
-        Reps(u) => format!("\"prop:reps{}{}\"", operator, u),
-        Lapses(u) => format!("\"prop:lapses{}{}\"", operator, u),
-        Ease(f) => format!("\"prop:ease{}{}\"", operator, f),
-        Position(u) => format!("\"prop:pos{}{}\"", operator, u),
+        Due(i) => format!("prop:due{}{}", operator, i),
+        Interval(u) => format!("prop:ivl{}{}", operator, u),
+        Reps(u) => format!("prop:reps{}{}", operator, u),
+        Lapses(u) => format!("prop:lapses{}{}", operator, u),
+        Ease(f) => format!("prop:ease{}{}", operator, f),
+        Position(u) => format!("prop:pos{}{}", operator, u),
         Rated(u, ease) => match ease {
-            RatingKind::AnswerButton(val) => format!("\"prop:rated{}{}:{}\"", operator, u, val),
-            RatingKind::AnyAnswerButton => format!("\"prop:rated{}{}\"", operator, u),
-            RatingKind::ManualReschedule => format!("\"prop:resched{}{}\"", operator, u),
+            RatingKind::AnswerButton(val) => format!("prop:rated{}{}:{}", operator, u, val),
+            RatingKind::AnyAnswerButton => format!("prop:rated{}{}", operator, u),
+            RatingKind::ManualReschedule => format!("prop:resched{}{}", operator, u),
         },
     }
+}
+
+pub(crate) fn deck_search(name: &str) -> String {
+    write_nodes(&[Node::Search(SearchNode::Deck(escape_anki_wildcards(name)))])
+}
+
+/// Take an Anki-style search string and convert it into an equivalent
+/// search string with normalized syntax.
+pub(crate) fn normalize_search(input: &str) -> Result<String> {
+    Ok(write_nodes(&parse(input)?))
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::err::Result;
-    use crate::search::parse_search as parse;
+    use crate::{error::Result, search::parse_search as parse};
 
-    /// Take an Anki-style search string and convert it into an equivalent
-    /// search string with normalized syntax.
-    fn normalize_search(input: &str) -> Result<String> {
-        Ok(write_nodes(&parse(input)?))
+    #[test]
+    fn normalizing() {
+        assert_eq!(
+            r#"foo "b a r""#,
+            normalize_search(r#""foo" "b a r""#).unwrap()
+        );
+        assert_eq!(r#""(" -"#, normalize_search(r"\( \-").unwrap());
+        assert_eq!("deck::", normalize_search(r"deck:\:").unwrap());
+        assert_eq!(r"\* OR \:", normalize_search(r"\* or \:").unwrap());
+        assert_eq!("field:foo", normalize_search(r#"field:"foo""#).unwrap());
+        assert_eq!("prop:ease>1", normalize_search("prop:ease>1.0").unwrap());
     }
 
     #[test]
-    fn normalizing() -> Result<()> {
-        assert_eq!(r#""(" AND "-""#, normalize_search(r"\( \-").unwrap());
-        assert_eq!(r#""deck::""#, normalize_search(r"deck:\:").unwrap());
-        assert_eq!(r#""\*" OR "\:""#, normalize_search(r"\* or \:").unwrap());
-        assert_eq!(
-            r#""field:foo""#,
-            normalize_search(r#"field:"foo""#).unwrap()
-        );
-        assert_eq!(
-            r#""prop:ease>1""#,
-            normalize_search("prop:ease>1.0").unwrap()
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn concatenating() -> Result<()> {
+    fn concatenating() {
         assert_eq!(
             concatenate_searches(
                 BoolSeparator::And,
                 vec![Node::Search(SearchNode::UnqualifiedText("foo".to_string()))],
                 Node::Search(SearchNode::UnqualifiedText("bar".to_string()))
             ),
-            r#""foo" AND "bar""#,
+            "foo bar",
         );
         assert_eq!(
             concatenate_searches(
@@ -217,7 +226,7 @@ mod test {
                 vec![Node::Search(SearchNode::UnqualifiedText("foo".to_string()))],
                 Node::Search(SearchNode::UnqualifiedText("bar".to_string()))
             ),
-            r#""foo" OR "bar""#,
+            "foo OR bar",
         );
         assert_eq!(
             concatenate_searches(
@@ -225,7 +234,7 @@ mod test {
                 vec![Node::Search(SearchNode::WholeCollection)],
                 Node::Search(SearchNode::UnqualifiedText("bar".to_string()))
             ),
-            r#""deck:*" OR "bar""#,
+            "deck:* OR bar",
         );
         assert_eq!(
             concatenate_searches(
@@ -233,39 +242,37 @@ mod test {
                 vec![],
                 Node::Search(SearchNode::UnqualifiedText("bar".to_string()))
             ),
-            r#""bar""#,
+            "bar",
         );
-
-        Ok(())
     }
 
     #[test]
     fn replacing() -> Result<()> {
         assert_eq!(
             replace_search_node(parse("deck:baz bar")?, parse("deck:foo")?.pop().unwrap()),
-            r#""deck:foo" AND "bar""#,
+            "deck:foo bar",
         );
         assert_eq!(
             replace_search_node(
                 parse("tag:foo Or tag:bar")?,
                 parse("tag:baz")?.pop().unwrap()
             ),
-            r#""tag:baz" OR "tag:baz""#,
+            "tag:baz OR tag:baz",
         );
         assert_eq!(
             replace_search_node(
                 parse("foo or (-foo tag:baz)")?,
                 parse("bar")?.pop().unwrap()
             ),
-            r#""bar" OR (-"bar" AND "tag:baz")"#,
+            "bar OR (-bar tag:baz)",
         );
         assert_eq!(
             replace_search_node(parse("is:due")?, parse("-is:new")?.pop().unwrap()),
-            r#""is:due""#
+            "is:due"
         );
         assert_eq!(
             replace_search_node(parse("added:1")?, parse("is:due")?.pop().unwrap()),
-            r#""added:1""#
+            "added:1"
         );
 
         Ok(())

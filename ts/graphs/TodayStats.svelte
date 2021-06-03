@@ -1,26 +1,35 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
-    import { gatherData } from "./today";
+    import type pb from "lib/backend_proto";
+
+    import Graph from "./Graph.svelte";
+
     import type { TodayData } from "./today";
-    import type pb from "anki/backend_proto";
-    import type { I18n } from "anki/i18n";
+    import { gatherData } from "./today";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
-    export let i18n: I18n;
 
     let todayData: TodayData | null = null;
     $: if (sourceData) {
-        todayData = gatherData(sourceData, i18n);
+        todayData = gatherData(sourceData);
     }
 </script>
 
 {#if todayData}
-    <div class="graph" id="graph-today-stats">
-        <h1>{todayData.title}</h1>
-
-        <div class="legend-outer">
+    <Graph title={todayData.title}>
+        <div class="legend">
             {#each todayData.lines as line}
                 <div>{line}</div>
             {/each}
         </div>
-    </div>
+    </Graph>
 {/if}
+
+<style lang="scss">
+    .legend {
+        text-align: center;
+    }
+</style>

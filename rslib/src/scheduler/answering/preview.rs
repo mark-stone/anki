@@ -1,14 +1,12 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use super::{CardStateUpdater, RevlogEntryPartial};
 use crate::{
     card::CardQueue,
     config::SchedulerVersion,
-    prelude::*,
     scheduler::states::{CardState, IntervalKind, PreviewState},
 };
-
-use super::{CardStateUpdater, RevlogEntryPartial};
 
 impl CardStateUpdater {
     // fixme: check learning card moved into preview
@@ -17,11 +15,11 @@ impl CardStateUpdater {
         &mut self,
         current: CardState,
         next: PreviewState,
-    ) -> Result<Option<RevlogEntryPartial>> {
+    ) -> Option<RevlogEntryPartial> {
         if next.finished {
             self.card
                 .remove_from_filtered_deck_restoring_queue(SchedulerVersion::V2);
-            return Ok(None);
+            return None;
         }
 
         self.card.queue = CardQueue::PreviewRepeat;
@@ -29,29 +27,24 @@ impl CardStateUpdater {
         let interval = next.interval_kind();
         match interval {
             IntervalKind::InSecs(secs) => {
-                self.card.due = self.now.0 as i32 + secs as i32;
+                self.card.due = self.fuzzed_next_learning_timestamp(secs);
             }
             IntervalKind::InDays(_days) => {
                 // unsupported
             }
         }
 
-        Ok(RevlogEntryPartial::maybe_new(
-            current,
-            next.into(),
-            0.0,
-            self.secs_until_rollover(),
-        ))
+        RevlogEntryPartial::maybe_new(current, next.into(), 0.0, self.secs_until_rollover())
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::collection::open_test_collection;
-
     use super::*;
     use crate::{
         card::CardType,
+        collection::open_test_collection,
+        prelude::*,
         scheduler::{
             answering::{CardAnswer, Rating},
             states::{CardState, FilteredState},
@@ -63,7 +56,7 @@ mod test {
     fn preview() -> Result<()> {
         let mut col = open_test_collection();
         let mut c = Card {
-            deck_id: DeckID(1),
+            deck_id: DeckId(1),
             ctype: CardType::Learn,
             queue: CardQueue::DayLearn,
             remaining_steps: 2,
@@ -76,7 +69,7 @@ mod test {
         let mut filtered_deck = Deck::new_filtered();
         filtered_deck.filtered_mut()?.reschedule = false;
         col.add_or_update_deck(&mut filtered_deck)?;
-        assert_eq!(col.rebuild_filtered_deck(filtered_deck.id)?, 1);
+        assert_eq!(col.rebuild_filtered_deck(filtered_deck.id)?.output, 1);
 
         let next = col.get_next_card_states(c.id)?;
         assert!(matches!(

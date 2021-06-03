@@ -1,4 +1,5 @@
-# coding: utf-8
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import time
 
@@ -24,7 +25,7 @@ def test_op():
     # with about 5 minutes until it's clobbered
     assert time.time() - col._last_checkpoint_at < 1
     # undoing should restore the old value
-    col.undo()
+    col.undo_legacy()
     assert not col.undoName()
     assert "abc" not in col.conf
     # an (auto)save will clear the undo
@@ -64,7 +65,7 @@ def test_review():
     assert c.queue == QUEUE_TYPE_LRN
     # undo
     assert col.undoName()
-    col.undo()
+    col.undo_legacy()
     col.reset()
     assert col.sched.counts() == (2, 0, 0)
     c.load()
@@ -77,10 +78,10 @@ def test_review():
     c = col.sched.getCard()
     col.sched.answerCard(c, 3)
     assert col.sched.counts() == (0, 2, 0)
-    col.undo()
+    col.undo_legacy()
     col.reset()
     assert col.sched.counts() == (1, 1, 0)
-    col.undo()
+    col.undo_legacy()
     col.reset()
     assert col.sched.counts() == (2, 0, 0)
     # performing a normal op will clear the review queue
@@ -89,5 +90,5 @@ def test_review():
     assert col.undoName() == "Review"
     col.save("foo")
     assert col.undoName() == "foo"
-    col.undo()
+    col.undo_legacy()
     assert not col.undoName()

@@ -1,17 +1,37 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+use std::{borrow::Cow, ptr};
+
 use lazy_static::lazy_static;
 use regex::{Captures, Regex};
-use std::borrow::Cow;
-use std::ptr;
 use unicase::eq as uni_eq;
 use unicode_normalization::{
     char::is_combining_mark, is_nfc, is_nfkd_quick, IsNormalized, UnicodeNormalization,
 };
 
+pub trait Trimming {
+    fn trim(self) -> Self;
+}
+
+impl Trimming for Cow<'_, str> {
+    fn trim(self) -> Self {
+        match self {
+            Cow::Borrowed(text) => text.trim().into(),
+            Cow::Owned(text) => {
+                let trimmed = text.as_str().trim();
+                if trimmed.len() == text.len() {
+                    text.into()
+                } else {
+                    trimmed.to_string().into()
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
-pub enum AVTag {
+pub enum AvTag {
     SoundOrVideo(String),
     TextToSpeech {
         field_text: String,
@@ -31,6 +51,19 @@ lazy_static! {
         r"|(<.*?>)",
     ))
     .unwrap();
+
+    static ref HTML_LINEBREAK_TAGS: Regex = Regex::new(
+        r#"(?xsi)
+            </?
+            (?:
+                br|address|article|aside|blockquote|canvas|dd|div
+                |dl|dt|fieldset|figcaption|figure|footer|form
+                |h[1-6]|header|hr|li|main|nav|noscript|ol
+                |output|p|pre|section|table|tfoot|ul|video
+            )
+            >
+        "#
+    ).unwrap();
 
     static ref HTML_MEDIA_TAGS: Regex = Regex::new(
         r#"(?xsi)
@@ -72,6 +105,29 @@ lazy_static! {
                 (.*?)           # 3 - field text
             \[/anki:tts\]
             "#).unwrap();
+
+    static ref PERSISTENT_HTML_SPACERS: Regex = Regex::new("<br>|<br />|<div>|\n").unwrap();
+
+    static ref UNPRINTABLE_TAGS: Regex = Regex::new(
+        r"(?xs)
+        \[sound:[^]]+\]
+        |
+        \[\[type:[^]]+\]\]
+    ").unwrap();
+}
+
+pub fn html_to_text_line(html: &str) -> Cow<str> {
+    let mut out: Cow<str> = html.into();
+    if let Cow::Owned(o) = PERSISTENT_HTML_SPACERS.replace_all(&out, " ") {
+        out = o.into();
+    }
+    if let Cow::Owned(o) = UNPRINTABLE_TAGS.replace_all(&out, "") {
+        out = o.into();
+    }
+    if let Cow::Owned(o) = strip_html_preserving_media_filenames(&out) {
+        out = o.into();
+    }
+    out.trim()
 }
 
 pub fn strip_html(html: &str) -> Cow<str> {
@@ -95,10 +151,9 @@ pub fn strip_html_preserving_entities(html: &str) -> Cow<str> {
 pub fn decode_entities(html: &str) -> Cow<str> {
     if html.contains('&') {
         match htmlescape::decode_html(html) {
-            Ok(text) => text.replace('\u{a0}', " "),
-            Err(e) => format!("{:?}", e),
+            Ok(text) => text.replace('\u{a0}', " ").into(),
+            Err(_) => html.into(),
         }
-        .into()
     } else {
         // nothing to do
         html.into()
@@ -106,10 +161,17 @@ pub fn decode_entities(html: &str) -> Cow<str> {
 }
 
 pub fn strip_html_for_tts(html: &str) -> Cow<str> {
-    match HTML.replace_all(html, " ") {
-        Cow::Borrowed(_) => decode_entities(html),
-        Cow::Owned(s) => decode_entities(&s).to_string().into(),
+    let mut out: Cow<str> = html.into();
+
+    if let Cow::Owned(o) = HTML_LINEBREAK_TAGS.replace_all(html, " ") {
+        out = o.into();
     }
+
+    if let Cow::Owned(o) = strip_html(out.as_ref()) {
+        out = o.into();
+    }
+
+    out
 }
 
 pub fn strip_av_tags(text: &str) -> Cow<str> {
@@ -117,13 +179,13 @@ pub fn strip_av_tags(text: &str) -> Cow<str> {
 }
 
 /// Extract audio tags from string, replacing them with [anki:play] refs
-pub fn extract_av_tags(text: &str, question_side: bool) -> (Cow<str>, Vec<AVTag>) {
+pub fn extract_av_tags(text: &str, question_side: bool) -> (Cow<str>, Vec<AvTag>) {
     let mut tags = vec![];
     let context = if question_side { 'q' } else { 'a' };
     let replaced_text = AV_TAGS.replace_all(text, |caps: &Captures| {
         // extract
         let tag = if let Some(av_file) = caps.get(1) {
-            AVTag::SoundOrVideo(decode_entities(av_file.as_str()).into())
+            AvTag::SoundOrVideo(decode_entities(av_file.as_str()).into())
         } else {
             let args = caps.get(2).unwrap();
             let field_text = caps.get(3).unwrap();
@@ -179,7 +241,7 @@ pub(crate) fn extract_media_refs(text: &str) -> Vec<MediaRef> {
     out
 }
 
-fn tts_tag_from_string<'a>(field_text: &'a str, args: &'a str) -> AVTag {
+fn tts_tag_from_string<'a>(field_text: &'a str, args: &'a str) -> AvTag {
     let mut other_args = vec![];
     let mut split_args = args.split_ascii_whitespace();
     let lang = split_args.next().unwrap_or("");
@@ -204,7 +266,7 @@ fn tts_tag_from_string<'a>(field_text: &'a str, args: &'a str) -> AVTag {
         }
     }
 
-    AVTag::TextToSpeech {
+    AvTag::TextToSpeech {
         field_text: strip_html_for_tts(field_text).into(),
         lang: lang.into(),
         voices: voices.unwrap_or_else(Vec::new),
@@ -355,8 +417,9 @@ pub(crate) fn matches_glob(text: &str, search: &str) -> bool {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use std::borrow::Cow;
+
+    use super::*;
 
     #[test]
     fn stripping() {
@@ -377,8 +440,10 @@ mod test {
 
     #[test]
     fn audio() {
-        let s =
-            "abc[sound:fo&amp;o.mp3]def[anki:tts][en_US voices=Bob,Jane speed=1.2]foo<br>1&gt;2[/anki:tts]gh";
+        let s = concat!(
+            "abc[sound:fo&amp;obar.mp3]def[anki:tts][en_US voices=Bob,Jane speed=1.2]",
+            "foo b<i><b>a</b>r</i><br>1&gt;2[/anki:tts]gh",
+        );
         assert_eq!(strip_av_tags(s), "abcdefgh");
 
         let (text, tags) = extract_av_tags(s, true);
@@ -387,9 +452,9 @@ mod test {
         assert_eq!(
             tags,
             vec![
-                AVTag::SoundOrVideo("fo&o.mp3".into()),
-                AVTag::TextToSpeech {
-                    field_text: "foo 1>2".into(),
+                AvTag::SoundOrVideo("fo&obar.mp3".into()),
+                AvTag::TextToSpeech {
+                    field_text: "foo bar 1>2".into(),
                     lang: "en_US".into(),
                     voices: vec!["Bob".into(), "Jane".into()],
                     other_args: vec![],

@@ -2,11 +2,11 @@
  * License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html */
 
 @use 'vars';
-@use 'buttons';
+@use 'fusion_vars';
 
 @mixin night-mode {
     &::-webkit-scrollbar {
-        background: var(--window-bg);
+        background-color: var(--window-bg);
 
         &:horizontal {
             height: 12px;
@@ -18,7 +18,7 @@
     }
 
     &::-webkit-scrollbar-thumb {
-        background: buttons.$fusion-button-hover-bg;
+        background: fusion_vars.$button-hover-bg;
         border-radius: 8px;
 
         &:horizontal {
@@ -28,5 +28,9 @@
         &:vertical {
             min-height: 50px;
         }
+    }
+
+    &::-webkit-scrollbar-corner {
+        background-color: var(--window-bg);
     }
 }

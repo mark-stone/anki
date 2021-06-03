@@ -1,16 +1,17 @@
 load("@npm//@bazel/typescript:index.bzl", "ts_library")
-load("@npm//@bazel/rollup:index.bzl", "rollup_bundle")
-load("//ts:svelte.bzl", "compile_svelte", "svelte_check")
+load("//ts/svelte:svelte.bzl", "compile_svelte", "svelte_check")
 load("//ts:prettier.bzl", "prettier_test")
 load("//ts:eslint.bzl", "eslint_test")
-load("@io_bazel_rules_sass//:defs.bzl", "sass_binary")
+load("//ts:esbuild.bzl", "esbuild")
+load("//ts:compile_sass.bzl", "compile_sass")
 
-sass_binary(
-    name = "graphs_css",
-    src = "graphs.scss",
+compile_sass(
+    srcs = ["graphs-base.scss"],
+    group = "base_css",
     visibility = ["//visibility:public"],
     deps = [
-        "//ts/sass:core_lib",
+        "//ts/sass:base_lib",
+        "//ts/sass:scrollbar_lib",
     ],
 )
 
@@ -24,12 +25,13 @@ compile_svelte(
 )
 
 ts_library(
-    name = "bootstrap",
-    srcs = ["bootstrap.ts"],
+    name = "index",
+    srcs = ["index.ts"],
     deps = [
         "GraphsPage",
         "lib",
         "//ts/lib",
+        "//ts/sveltelib",
         "@npm//svelte",
         "@npm//svelte2tsx",
     ],
@@ -39,35 +41,43 @@ ts_library(
     name = "lib",
     srcs = glob(
         ["*.ts"],
-        exclude = ["bootstrap.ts"],
+        exclude = ["index.ts"],
     ),
     deps = [
         "//ts/lib",
         "//ts/lib:backend_proto",
+        "//ts/sveltelib",
         "@npm//@types/d3",
         "@npm//@types/lodash",
         "@npm//d3",
-        "@npm//lodash.debounce",
-        "@npm//lodash.throttle",
+        "@npm//lodash-es",
         "@npm//svelte",
     ],
 )
 
-rollup_bundle(
+esbuild(
     name = "graphs",
-    config_file = "//ts:rollup.config.js",
-    entry_point = "bootstrap.ts",
-    format = "iife",
-    link_workspace_root = True,
-    silent = True,
-    sourcemap = "false",
+    srcs = [
+        "//ts:protobuf-shim.js",
+    ],
+    args = [
+        "--global-name=anki",
+        "--inject:$(location //ts:protobuf-shim.js)",
+        "--resolve-extensions=.mjs,.js",
+        "--log-level=warning",
+    ],
+    entry_point = "index.ts",
+    external = [
+        "protobufjs/light",
+    ],
+    output_css = "graphs.css",
     visibility = ["//visibility:public"],
     deps = [
+        "//ts/sveltelib",
         "//ts/lib",
-        "bootstrap",
-        "@npm//@rollup/plugin-commonjs",
-        "@npm//@rollup/plugin-node-resolve",
-        "@npm//rollup-plugin-terser",
+        "//ts/lib:backend_proto",
+        ":index",
+        ":base_css",
     ] + svelte_names,
 )
 

@@ -1,22 +1,43 @@
 load("@npm//@bazel/typescript:index.bzl", "ts_library")
 load("//ts:prettier.bzl", "prettier_test")
 load("//ts:eslint.bzl", "eslint_test")
+load("//ts:protobuf.bzl", "protobufjs_library")
+load("//ts:jest.bzl", "jest_test")
 
 # Protobuf
 #############
 
-load("@npm//@bazel/labs:index.bzl", "protobufjs_ts_library")
-
-protobufjs_ts_library(
-    name = "fluent_proto",
+protobufjs_library(
+    name = "backend_proto",
+    proto = "//rslib:backend_proto_lib",
     visibility = ["//visibility:public"],
-    deps = ["//rslib:fluent_proto_lib"],
 )
 
-protobufjs_ts_library(
-    name = "backend_proto",
-    visibility = ["//visibility:public"],
-    deps = ["//rslib:backend_proto_lib"],
+# Translations
+################
+
+load("@rules_python//python:defs.bzl", "py_binary")
+load("@py_deps//:requirements.bzl", "requirement")
+
+py_binary(
+    name = "genfluent",
+    srcs = [
+        "genfluent.py",
+    ],
+    deps = [
+        requirement("black"),
+        requirement("stringcase"),
+    ],
+)
+
+genrule(
+    name = "fluent_gen",
+    outs = ["i18n.ts"],
+    cmd = "$(location genfluent) $(location //rslib/i18n:strings.json) $@",
+    tools = [
+        "genfluent",
+        "//rslib/i18n:strings.json",
+    ],
 )
 
 # Anki Library
@@ -24,16 +45,18 @@ protobufjs_ts_library(
 
 ts_library(
     name = "lib",
-    srcs = glob(["**/*.ts"]),
+    srcs = glob(
+        ["**/*.ts"],
+        exclude = ["*.test.ts"],
+    ) + [":i18n.ts"],
     data = [
         "backend_proto",
     ],
-    module_name = "anki",
+    module_name = "lib",
     tsconfig = "//:tsconfig.json",
     visibility = ["//visibility:public"],
     deps = [
         "backend_proto",
-        "fluent_proto",
         "@npm//@fluent/bundle",
         "@npm//@types/long",
         "@npm//intl-pluralrules",
@@ -52,4 +75,10 @@ prettier_test(
 eslint_test(
     name = "eslint",
     srcs = glob(["*.ts"]),
+)
+
+jest_test(
+    deps = [
+        ":lib",
+    ],
 )

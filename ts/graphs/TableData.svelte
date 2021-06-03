@@ -1,12 +1,14 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
-    import type { I18n } from "anki/i18n";
     import type { TableDatum } from "./graph-helpers";
-
-    export let i18n: I18n;
+    import { i18n } from "lib/i18n";
     export let tableData: TableDatum[];
 </script>
 
-<div class="centered">
+<div>
     <table dir={i18n.direction()}>
         {#each tableData as { label, value }}
             <tr>
@@ -16,3 +18,18 @@
         {/each}
     </table>
 </div>
+
+<style lang="scss">
+    div {
+        display: flex;
+        justify-content: center;
+    }
+
+    .align-end {
+        text-align: end;
+    }
+
+    .align-start {
+        text-align: start;
+    }
+</style>

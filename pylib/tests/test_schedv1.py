@@ -1,18 +1,21 @@
-# coding: utf-8
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 import copy
 import time
 
+from anki import Collection
 from anki.consts import *
 from anki.lang import without_unicode_isolation
 from anki.utils import intTime
 from tests.shared import getEmptyCol as getEmptyColOrig
 
 
-def getEmptyCol():
+def getEmptyCol() -> Collection:
     col = getEmptyColOrig()
     # only safe in test environment
     col.set_config("schedVer", 1)
+    col._loadScheduler()
     return col
 
 
@@ -270,7 +273,7 @@ def test_learn_day():
     # if we fail it, it should be back in the correct queue
     col.sched.answerCard(c, 1)
     assert c.queue == QUEUE_TYPE_LRN
-    col.undo()
+    col.undo_legacy()
     col.reset()
     c = col.sched.getCard()
     col.sched.answerCard(c, 2)
@@ -501,10 +504,10 @@ def test_misc():
     col.addNote(note)
     c = note.cards()[0]
     # burying
-    col.sched.bury_note(note)
+    col.sched.bury_notes([note.id])
     col.reset()
     assert not col.sched.getCard()
-    col.sched.unbury_cards_in_current_deck()
+    col.sched.unbury_deck(deck_id=col.decks.get_current_id())
     col.reset()
     assert col.sched.getCard()
 
@@ -808,7 +811,7 @@ def test_ordcycle():
     t["afmt"] = "{{Front}}"
     mm.addTemplate(m, t)
     t = mm.newTemplate("f2")
-    t["qfmt"] = "{{Front}}"
+    t["qfmt"] = "{{Front}}2"
     t["afmt"] = "{{Back}}"
     mm.addTemplate(m, t)
     mm.save(m)
@@ -1021,62 +1024,6 @@ def test_deckFlow():
         c = col.sched.getCard()
         assert c.note()["Front"] == i
         col.sched.answerCard(c, 2)
-
-
-def test_reorder():
-    col = getEmptyCol()
-    # add a note with default deck
-    note = col.newNote()
-    note["Front"] = "one"
-    col.addNote(note)
-    note2 = col.newNote()
-    note2["Front"] = "two"
-    col.addNote(note2)
-    assert note2.cards()[0].due == 2
-    found = False
-    # 50/50 chance of being reordered
-    for i in range(20):
-        col.sched.randomizeCards(1)
-        if note.cards()[0].due != note.id:
-            found = True
-            break
-    assert found
-    col.sched.orderCards(1)
-    assert note.cards()[0].due == 1
-    # shifting
-    note3 = col.newNote()
-    note3["Front"] = "three"
-    col.addNote(note3)
-    note4 = col.newNote()
-    note4["Front"] = "four"
-    col.addNote(note4)
-    assert note.cards()[0].due == 1
-    assert note2.cards()[0].due == 2
-    assert note3.cards()[0].due == 3
-    assert note4.cards()[0].due == 4
-    col.sched.sortCards([note3.cards()[0].id, note4.cards()[0].id], start=1, shift=True)
-    assert note.cards()[0].due == 3
-    assert note2.cards()[0].due == 4
-    assert note3.cards()[0].due == 1
-    assert note4.cards()[0].due == 2
-
-
-def test_forget():
-    col = getEmptyCol()
-    note = col.newNote()
-    note["Front"] = "one"
-    col.addNote(note)
-    c = note.cards()[0]
-    c.queue = QUEUE_TYPE_REV
-    c.type = CARD_TYPE_REV
-    c.ivl = 100
-    c.due = 0
-    c.flush()
-    col.reset()
-    assert col.sched.counts() == (0, 0, 1)
-    col.sched.forgetCards([c.id])
-    col.reset()
-    assert col.sched.counts() == (1, 0, 0)
 
 
 def test_norelearn():

@@ -1,20 +1,27 @@
+<!--
+Copyright: Ankitects Pty Ltd and contributors
+License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+-->
 <script lang="typescript">
-    import { RevlogRange, GraphRange } from "./graph-helpers";
-    import type { TableDatum, SearchEventMap } from "./graph-helpers";
-    import type { I18n } from "anki/i18n";
-    import type { HistogramData } from "./histogram-graph";
-    import { gatherData, buildHistogram } from "./added";
-    import type { GraphData } from "./added";
-    import type pb from "anki/backend_proto";
+    import type pb from "lib/backend_proto";
+    import type { PreferenceStore } from "sveltelib/preferences";
+    import { createEventDispatcher } from "svelte";
+
+    import Graph from "./Graph.svelte";
+    import InputBox from "./InputBox.svelte";
     import HistogramGraph from "./HistogramGraph.svelte";
     import GraphRangeRadios from "./GraphRangeRadios.svelte";
     import TableData from "./TableData.svelte";
-    import { createEventDispatcher } from "svelte";
-    import type { PreferenceStore } from "./preferences";
+
+    import { RevlogRange, GraphRange } from "./graph-helpers";
+    import type { TableDatum, SearchEventMap } from "./graph-helpers";
+    import type { HistogramData } from "./histogram-graph";
+    import { gatherData, buildHistogram } from "./added";
+    import type { GraphData } from "./added";
 
     export let sourceData: pb.BackendProto.GraphsOut | null = null;
-    export let i18n: I18n;
-    export let preferences: PreferenceStore;
+    import * as tr from "lib/i18n";
+    export let preferences: PreferenceStore<pb.BackendProto.GraphPreferences>;
 
     let histogramData = null as HistogramData | null;
     let tableData: TableDatum[] = [];
@@ -32,26 +39,21 @@
         [histogramData, tableData] = buildHistogram(
             addedData,
             graphRange,
-            i18n,
             dispatch,
             $browserLinksSupported
         );
     }
 
-    const title = i18n.tr(i18n.TR.STATISTICS_ADDED_TITLE);
-    const subtitle = i18n.tr(i18n.TR.STATISTICS_ADDED_SUBTITLE);
+    const title = tr.statisticsAddedTitle();
+    const subtitle = tr.statisticsAddedSubtitle();
 </script>
 
-<div class="graph" id="graph-added">
-    <h1>{title}</h1>
+<Graph {title} {subtitle}>
+    <InputBox>
+        <GraphRangeRadios bind:graphRange revlogRange={RevlogRange.All} />
+    </InputBox>
 
-    <div class="subtitle">{subtitle}</div>
+    <HistogramGraph data={histogramData} />
 
-    <div class="range-box-inner">
-        <GraphRangeRadios bind:graphRange {i18n} revlogRange={RevlogRange.All} />
-    </div>
-
-    <HistogramGraph data={histogramData} {i18n} />
-
-    <TableData {i18n} {tableData} />
-</div>
+    <TableData {tableData} />
+</Graph>

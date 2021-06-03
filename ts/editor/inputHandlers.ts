@@ -1,28 +1,20 @@
-/* Copyright: Ankitects Pty Ltd and contributors
- * License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html */
+// Copyright: Ankitects Pty Ltd and contributors
+// License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+/* eslint
+@typescript-eslint/no-non-null-assertion: "off",
+ */
+
+import { updateActiveButtons } from "./toolbar";
 import { EditingArea } from "./editingArea";
-import { caretToEnd, nodeIsElement } from "./helpers";
+import { caretToEnd, nodeIsElement, getBlockElement } from "./helpers";
 import { triggerChangeTimer } from "./changeTimer";
-import { updateButtonState } from "./toolbar";
-
-function inListItem(currentField: EditingArea): boolean {
-    const anchor = currentField.getSelection()!.anchorNode!;
-
-    let inList = false;
-    let n = nodeIsElement(anchor) ? anchor : anchor.parentElement;
-    while (n) {
-        inList = inList || window.getComputedStyle(n).display == "list-item";
-        n = n.parentElement;
-    }
-
-    return inList;
-}
+import { registerShortcut } from "lib/shortcuts";
 
 export function onInput(event: Event): void {
     // make sure IME changes get saved
     triggerChangeTimer(event.currentTarget as EditingArea);
-    updateButtonState();
+    updateActiveButtons(event);
 }
 
 export function onKey(evt: KeyboardEvent): void {
@@ -35,7 +27,10 @@ export function onKey(evt: KeyboardEvent): void {
     }
 
     // prefer <br> instead of <div></div>
-    if (evt.code === "Enter" && !inListItem(currentField)) {
+    if (
+        evt.code === "Enter" &&
+        !getBlockElement(currentField.shadowRoot!) !== evt.shiftKey
+    ) {
         evt.preventDefault();
         document.execCommand("insertLineBreak");
     }
@@ -61,21 +56,18 @@ export function onKey(evt: KeyboardEvent): void {
     triggerChangeTimer(currentField);
 }
 
-globalThis.addEventListener("keydown", (evt: KeyboardEvent) => {
-    if (evt.code === "Tab") {
-        globalThis.addEventListener(
-            "focusin",
-            (evt: FocusEvent) => {
-                const newFocusTarget = evt.target;
-                if (newFocusTarget instanceof EditingArea) {
-                    caretToEnd(newFocusTarget);
-                    updateButtonState();
-                }
-            },
-            { once: true }
-        );
+function updateFocus(evt: FocusEvent) {
+    const newFocusTarget = evt.target;
+    if (newFocusTarget instanceof EditingArea) {
+        caretToEnd(newFocusTarget);
+        updateActiveButtons(evt);
     }
-});
+}
+
+registerShortcut(
+    () => document.addEventListener("focusin", updateFocus, { once: true }),
+    "Shift?+Tab"
+);
 
 export function onKeyUp(evt: KeyboardEvent): void {
     const currentField = evt.currentTarget as EditingArea;

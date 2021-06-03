@@ -1,14 +1,18 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::parser::{Node, PropertyKind, RatingKind, SearchNode, StateKind, TemplateKind};
+use std::{borrow::Cow, fmt::Write};
+
+use super::{
+    parser::{Node, PropertyKind, RatingKind, SearchNode, StateKind, TemplateKind},
+    ReturnItemType,
+};
 use crate::{
     card::{CardQueue, CardType},
     collection::Collection,
-    decks::human_deck_name_to_native,
-    err::Result,
+    error::Result,
     notes::field_checksum,
-    notetype::NoteTypeID,
+    notetype::NotetypeId,
     prelude::*,
     storage::ids_to_string,
     text::{
@@ -17,60 +21,52 @@ use crate::{
     },
     timestamp::TimestampSecs,
 };
-use std::{borrow::Cow, fmt::Write};
 
 pub(crate) struct SqlWriter<'a> {
     col: &'a mut Collection,
     sql: String,
+    item_type: ReturnItemType,
     args: Vec<String>,
     normalize_note_text: bool,
     table: RequiredTable,
 }
 
 impl SqlWriter<'_> {
-    pub(crate) fn new(col: &mut Collection) -> SqlWriter<'_> {
-        let normalize_note_text = col.get_bool(BoolKey::NormalizeNoteText);
+    pub(crate) fn new(col: &mut Collection, item_type: ReturnItemType) -> SqlWriter<'_> {
+        let normalize_note_text = col.get_config_bool(BoolKey::NormalizeNoteText);
         let sql = String::new();
         let args = vec![];
         SqlWriter {
             col,
             sql,
+            item_type,
             args,
             normalize_note_text,
-            table: RequiredTable::CardsOrNotes,
+            table: item_type.required_table(),
         }
     }
 
-    pub(super) fn build_cards_query(
+    pub(super) fn build_query(
         mut self,
         node: &Node,
         table: RequiredTable,
     ) -> Result<(String, Vec<String>)> {
-        self.table = table.combine(node.required_table());
-        self.write_cards_table_sql();
+        self.table = self.table.combine(table.combine(node.required_table()));
+        self.write_table_sql();
         self.write_node_to_sql(&node)?;
         Ok((self.sql, self.args))
     }
 
-    pub(super) fn build_notes_query(mut self, node: &Node) -> Result<(String, Vec<String>)> {
-        self.table = RequiredTable::Notes.combine(node.required_table());
-        self.write_notes_table_sql();
-        self.write_node_to_sql(&node)?;
-        Ok((self.sql, self.args))
-    }
-
-    fn write_cards_table_sql(&mut self) {
+    fn write_table_sql(&mut self) {
         let sql = match self.table {
             RequiredTable::Cards => "select c.id from cards c where ",
-            _ => "select c.id from cards c, notes n where c.nid=n.id and ",
-        };
-        self.sql.push_str(sql);
-    }
-
-    fn write_notes_table_sql(&mut self) {
-        let sql = match self.table {
             RequiredTable::Notes => "select n.id from notes n where ",
-            _ => "select distinct n.id from cards c, notes n where c.nid=n.id and ",
+            _ => match self.item_type {
+                ReturnItemType::Cards => "select c.id from cards c, notes n where c.nid=n.id and ",
+                ReturnItemType::Notes => {
+                    "select distinct n.id from cards c, notes n where c.nid=n.id and "
+                }
+            },
         };
         self.sql.push_str(sql);
     }
@@ -123,8 +119,8 @@ impl SqlWriter<'_> {
             SearchNode::SingleField { field, text, is_re } => {
                 self.write_single_field(&norm(field), &self.norm_note(text), *is_re)?
             }
-            SearchNode::Duplicates { note_type_id, text } => {
-                self.write_dupe(*note_type_id, &self.norm_note(text))?
+            SearchNode::Duplicates { notetype_id, text } => {
+                self.write_dupe(*notetype_id, &self.norm_note(text))?
             }
             SearchNode::Regex(re) => self.write_regex(&self.norm_note(re)),
             SearchNode::NoCombining(text) => self.write_no_combining(&self.norm_note(text)),
@@ -133,31 +129,33 @@ impl SqlWriter<'_> {
             // other
             SearchNode::AddedInDays(days) => self.write_added(*days)?,
             SearchNode::EditedInDays(days) => self.write_edited(*days)?,
+            SearchNode::IntroducedInDays(days) => self.write_introduced(*days)?,
             SearchNode::CardTemplate(template) => match template {
-                TemplateKind::Ordinal(_) => self.write_template(template)?,
+                TemplateKind::Ordinal(_) => self.write_template(template),
                 TemplateKind::Name(name) => {
-                    self.write_template(&TemplateKind::Name(norm(name).into()))?
+                    self.write_template(&TemplateKind::Name(norm(name).into()))
                 }
             },
             SearchNode::Deck(deck) => self.write_deck(&norm(deck))?,
-            SearchNode::NoteTypeID(ntid) => {
+            SearchNode::NotetypeId(ntid) => {
                 write!(self.sql, "n.mid = {}", ntid).unwrap();
             }
-            SearchNode::DeckID(did) => {
+            SearchNode::DeckIdWithoutChildren(did) => {
                 write!(self.sql, "c.did = {}", did).unwrap();
             }
-            SearchNode::NoteType(notetype) => self.write_note_type(&norm(notetype))?,
+            SearchNode::DeckIdWithChildren(did) => self.write_deck_id_with_children(*did)?,
+            SearchNode::Notetype(notetype) => self.write_notetype(&norm(notetype)),
             SearchNode::Rated { days, ease } => self.write_rated(">", -i64::from(*days), ease)?,
 
-            SearchNode::Tag(tag) => self.write_tag(&norm(tag))?,
+            SearchNode::Tag(tag) => self.write_tag(&norm(tag)),
             SearchNode::State(state) => self.write_state(state)?,
             SearchNode::Flag(flag) => {
                 write!(self.sql, "(c.flags & 7) == {}", flag).unwrap();
             }
-            SearchNode::NoteIDs(nids) => {
+            SearchNode::NoteIds(nids) => {
                 write!(self.sql, "{} in ({})", self.note_id_column(), nids).unwrap();
             }
-            SearchNode::CardIDs(cids) => {
+            SearchNode::CardIds(cids) => {
                 write!(self.sql, "c.id in ({})", cids).unwrap();
             }
             SearchNode::Property { operator, kind } => self.write_prop(operator, kind)?,
@@ -192,7 +190,7 @@ impl SqlWriter<'_> {
         .unwrap();
     }
 
-    fn write_tag(&mut self, text: &str) -> Result<()> {
+    fn write_tag(&mut self, text: &str) {
         if text.contains(' ') {
             write!(self.sql, "false").unwrap();
         } else {
@@ -210,14 +208,12 @@ impl SqlWriter<'_> {
                 }
             }
         }
-
-        Ok(())
     }
 
     fn write_rated(&mut self, op: &str, days: i64, ease: &RatingKind) -> Result<()> {
         let today_cutoff = self.col.timing_today()?.next_day_at;
-        let target_cutoff_ms = (today_cutoff + 86_400 * days) * 1_000;
-        let day_before_cutoff_ms = (today_cutoff + 86_400 * (days - 1)) * 1_000;
+        let target_cutoff_ms = today_cutoff.adding_secs(86_400 * days).as_millis();
+        let day_before_cutoff_ms = today_cutoff.adding_secs(86_400 * (days - 1)).as_millis();
 
         write!(self.sql, "c.id in (select cid from revlog where id").unwrap();
 
@@ -230,13 +226,13 @@ impl SqlWriter<'_> {
                 self.sql,
                 " between {} and {}",
                 day_before_cutoff_ms,
-                target_cutoff_ms - 1
+                target_cutoff_ms.0 - 1
             ),
             "!=" => write!(
                 self.sql,
                 " not between {} and {}",
                 day_before_cutoff_ms,
-                target_cutoff_ms - 1
+                target_cutoff_ms.0 - 1
             ),
             _ => unreachable!("unexpected op"),
         }
@@ -353,11 +349,13 @@ impl SqlWriter<'_> {
                             .storage
                             .get_deck(current_did)?
                             .map(|d| d.name)
-                            .unwrap_or_else(|| "Default".into())
-                            .as_str(),
+                            .unwrap_or_else(|| NativeDeckName::from_native_str("Default"))
+                            .as_native_str(),
                     )
                 } else {
-                    human_deck_name_to_native(&to_re(deck))
+                    NativeDeckName::from_human_name(&to_re(deck))
+                        .as_native_str()
+                        .to_string()
                 };
 
                 // convert to a regex that includes child decks
@@ -373,7 +371,20 @@ impl SqlWriter<'_> {
         Ok(())
     }
 
-    fn write_template(&mut self, template: &TemplateKind) -> Result<()> {
+    fn write_deck_id_with_children(&mut self, deck_id: DeckId) -> Result<()> {
+        if let Some(parent) = self.col.get_deck(deck_id)? {
+            let ids = self.col.storage.deck_id_with_children(&parent)?;
+            let mut buf = String::new();
+            ids_to_string(&mut buf, &ids);
+            write!(self.sql, "c.did in {}", buf,).unwrap();
+        } else {
+            self.sql.push_str("false")
+        }
+
+        Ok(())
+    }
+
+    fn write_template(&mut self, template: &TemplateKind) {
         match template {
             TemplateKind::Ordinal(n) => {
                 write!(self.sql, "c.ord = {}", n).unwrap();
@@ -393,10 +404,9 @@ impl SqlWriter<'_> {
                 }
             }
         };
-        Ok(())
     }
 
-    fn write_note_type(&mut self, nt_name: &str) -> Result<()> {
+    fn write_notetype(&mut self, nt_name: &str) {
         if is_glob(nt_name) {
             let re = format!("(?i){}", to_re(nt_name));
             self.sql
@@ -407,14 +417,13 @@ impl SqlWriter<'_> {
                 .push_str("n.mid in (select id from notetypes where name = ?)");
             self.args.push(to_text(nt_name).into());
         }
-        Ok(())
     }
 
     fn write_single_field(&mut self, field_name: &str, val: &str, is_re: bool) -> Result<()> {
-        let note_types = self.col.get_all_notetypes()?;
+        let notetypes = self.col.get_all_notetypes()?;
 
         let mut field_map = vec![];
-        for nt in note_types.values() {
+        for nt in notetypes.values() {
             for field in &nt.fields {
                 if matches_glob(&field.name, field_name) {
                     field_map.push((nt.id, field.ord));
@@ -461,7 +470,7 @@ impl SqlWriter<'_> {
         Ok(())
     }
 
-    fn write_dupe(&mut self, ntid: NoteTypeID, text: &str) -> Result<()> {
+    fn write_dupe(&mut self, ntid: NotetypeId, text: &str) -> Result<()> {
         let text_nohtml = strip_html_preserving_media_filenames(text);
         let csum = field_checksum(text_nohtml.as_ref());
 
@@ -485,17 +494,34 @@ impl SqlWriter<'_> {
         Ok(())
     }
 
-    fn write_added(&mut self, days: u32) -> Result<()> {
+    fn previous_day_cutoff(&mut self, days_back: u32) -> Result<TimestampSecs> {
         let timing = self.col.timing_today()?;
-        let cutoff = (timing.next_day_at - (86_400 * (days as i64))) * 1_000;
+        Ok(timing.next_day_at.adding_secs(-86_400 * days_back as i64))
+    }
+
+    fn write_added(&mut self, days: u32) -> Result<()> {
+        let cutoff = self.previous_day_cutoff(days)?.as_millis();
         write!(self.sql, "c.id > {}", cutoff).unwrap();
         Ok(())
     }
 
     fn write_edited(&mut self, days: u32) -> Result<()> {
-        let timing = self.col.timing_today()?;
-        let cutoff = timing.next_day_at - (86_400 * (days as i64));
+        let cutoff = self.previous_day_cutoff(days)?;
         write!(self.sql, "n.mod > {}", cutoff).unwrap();
+        Ok(())
+    }
+
+    fn write_introduced(&mut self, days: u32) -> Result<()> {
+        let cutoff = self.previous_day_cutoff(days)?.as_millis();
+        write!(
+            self.sql,
+            concat!(
+                "(select min(id) > {cutoff} from revlog where cid = c.id)",
+                "and c.id in (select cid from revlog where id > {cutoff})"
+            ),
+            cutoff = cutoff,
+        )
+        .unwrap();
         Ok(())
     }
 
@@ -553,12 +579,14 @@ impl SearchNode {
     fn required_table(&self) -> RequiredTable {
         match self {
             SearchNode::AddedInDays(_) => RequiredTable::Cards,
+            SearchNode::IntroducedInDays(_) => RequiredTable::Cards,
             SearchNode::Deck(_) => RequiredTable::Cards,
-            SearchNode::DeckID(_) => RequiredTable::Cards,
+            SearchNode::DeckIdWithoutChildren(_) => RequiredTable::Cards,
+            SearchNode::DeckIdWithChildren(_) => RequiredTable::Cards,
             SearchNode::Rated { .. } => RequiredTable::Cards,
             SearchNode::State(_) => RequiredTable::Cards,
             SearchNode::Flag(_) => RequiredTable::Cards,
-            SearchNode::CardIDs(_) => RequiredTable::Cards,
+            SearchNode::CardIds(_) => RequiredTable::Cards,
             SearchNode::Property { .. } => RequiredTable::Cards,
 
             SearchNode::UnqualifiedText(_) => RequiredTable::Notes,
@@ -568,11 +596,11 @@ impl SearchNode {
             SearchNode::Regex(_) => RequiredTable::Notes,
             SearchNode::NoCombining(_) => RequiredTable::Notes,
             SearchNode::WordBoundary(_) => RequiredTable::Notes,
-            SearchNode::NoteTypeID(_) => RequiredTable::Notes,
-            SearchNode::NoteType(_) => RequiredTable::Notes,
+            SearchNode::NotetypeId(_) => RequiredTable::Notes,
+            SearchNode::Notetype(_) => RequiredTable::Notes,
             SearchNode::EditedInDays(_) => RequiredTable::Notes,
 
-            SearchNode::NoteIDs(_) => RequiredTable::CardsOrNotes,
+            SearchNode::NoteIds(_) => RequiredTable::CardsOrNotes,
             SearchNode::WholeCollection => RequiredTable::CardsOrNotes,
 
             SearchNode::CardTemplate(_) => RequiredTable::CardsAndNotes,
@@ -582,41 +610,41 @@ impl SearchNode {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use std::{fs, path::PathBuf};
+
+    use tempfile::tempdir;
+
+    use super::{super::parser::parse, *};
     use crate::{
         collection::{open_collection, Collection},
         i18n::I18n,
         log,
     };
-    use std::{fs, path::PathBuf};
-    use tempfile::tempdir;
-
-    use super::super::parser::parse;
 
     // shortcut
     fn s(req: &mut Collection, search: &str) -> (String, Vec<String>) {
         let node = Node::Group(parse(search).unwrap());
-        let mut writer = SqlWriter::new(req);
+        let mut writer = SqlWriter::new(req, ReturnItemType::Cards);
         writer.table = RequiredTable::Notes.combine(node.required_table());
         writer.write_node_to_sql(&node).unwrap();
         (writer.sql, writer.args)
     }
 
     #[test]
-    fn sql() -> Result<()> {
+    fn sql() {
         // re-use the mediacheck .anki2 file for now
         use crate::media::check::test::MEDIACHECK_ANKI2;
         let dir = tempdir().unwrap();
         let col_path = dir.path().join("col.anki2");
         fs::write(&col_path, MEDIACHECK_ANKI2).unwrap();
 
-        let i18n = I18n::new(&[""], "", log::terminal());
+        let tr = I18n::template_only();
         let mut col = open_collection(
             &col_path,
             &PathBuf::new(),
             &PathBuf::new(),
             false,
-            i18n,
+            tr,
             log::terminal(),
         )
         .unwrap();
@@ -654,9 +682,22 @@ mod test {
         let timing = ctx.timing_today().unwrap();
         assert_eq!(
             s(ctx, "added:3").0,
-            format!("(c.id > {})", (timing.next_day_at - (86_400 * 3)) * 1_000)
+            format!("(c.id > {})", (timing.next_day_at.0 - (86_400 * 3)) * 1_000)
         );
         assert_eq!(s(ctx, "added:0").0, s(ctx, "added:1").0,);
+
+        // introduced
+        assert_eq!(
+            s(ctx, "introduced:3").0,
+            format!(
+                concat!(
+                    "((select min(id) > {cutoff} from revlog where cid = c.id)",
+                    "and c.id in (select cid from revlog where id > {cutoff}))"
+                ),
+                cutoff = (timing.next_day_at.0 - (86_400 * 3)) * 1_000,
+            )
+        );
+        assert_eq!(s(ctx, "introduced:0").0, s(ctx, "introduced:1").0,);
 
         // deck
         assert_eq!(
@@ -738,14 +779,14 @@ mod test {
             s(ctx, "rated:2").0,
             format!(
                 "(c.id in (select cid from revlog where id >= {} and ease > 0))",
-                (timing.next_day_at - (86_400 * 2)) * 1_000
+                (timing.next_day_at.0 - (86_400 * 2)) * 1_000
             )
         );
         assert_eq!(
             s(ctx, "rated:400:1").0,
             format!(
                 "(c.id in (select cid from revlog where id >= {} and ease = 1))",
-                (timing.next_day_at - (86_400 * 400)) * 1_000
+                (timing.next_day_at.0 - (86_400 * 400)) * 1_000
             )
         );
         assert_eq!(s(ctx, "rated:0").0, s(ctx, "rated:1").0);
@@ -755,7 +796,7 @@ mod test {
             s(ctx, "resched:400").0,
             format!(
                 "(c.id in (select cid from revlog where id >= {} and ease = 0))",
-                (timing.next_day_at - (86_400 * 400)) * 1_000
+                (timing.next_day_at.0 - (86_400 * 400)) * 1_000
             )
         );
 
@@ -808,8 +849,6 @@ mod test {
             s(ctx, r"w:*fo_o*"),
             ("(n.flds regexp ?)".into(), vec![r"(?i)\b.*fo.o.*\b".into()])
         );
-
-        Ok(())
     }
 
     #[test]

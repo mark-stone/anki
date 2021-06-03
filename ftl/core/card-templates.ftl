@@ -1,3 +1,5 @@
+# This word is used by TTS voices instead of the elided part of a cloze.
+card-templates-blank = blank
 card-templates-changes-will-affect-notes =
     { $count ->
         [one] Changes below will affect the { $count } note that uses this card type.
@@ -18,7 +20,12 @@ card-templates-night-mode = Night Mode
 # on a mobile device.
 card-templates-add-mobile-class = Add Mobile Class
 card-templates-preview-settings = Options
-card-templates-invalid-template-number = Card template { $number } has a problem.
+card-templates-invalid-template-number = Card template { $number } in notetype '{ $notetype }' has a problem.
+card-templates-identical-front = The front side is identical to card template { $number }.
+card-templates-no-front-field = Expected to find a field replacement on the front of the card template.
+card-templates-missing-cloze = Expected to find '{ "{{" }cloze:Text{ "}}" }' or similar on the front and back of the card template.
+card-templates-extraneous-cloze = 'cloze:' can only be used on cloze notetypes.
+card-templates-see-preview = See the preview for more information.
 card-templates-changes-saved = Changes saved.
 card-templates-discard-changes = Discard changes?
 card-templates-add-card-type = Add Card Type...

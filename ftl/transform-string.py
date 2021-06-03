@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# -*- coding: UTF-8 -*-
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
 """
 Tool to apply transform to an ftl string and its translations.
 """
 
-import os
-import json
 import glob
+import json
+import os
+
 from fluent.syntax import parse, serialize
 from fluent.syntax.ast import Junk
 

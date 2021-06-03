@@ -22,6 +22,7 @@ import {
 import type { ScaleLinear, ScaleSequential, Bin } from "d3";
 import { showTooltip, hideTooltip } from "./tooltip";
 import { GraphBounds, setDataAvailable } from "./graph-helpers";
+import { clickableClass } from "./graph-styles";
 
 export interface HistogramData {
     scale: ScaleLinear<number, number>;
@@ -58,13 +59,15 @@ export function histogramGraph(
 
     const x = data.scale.range([bounds.marginLeft, bounds.width - bounds.marginRight]);
     svg.select<SVGGElement>(".x-ticks")
-        .transition(trans)
-        .call(
-            axisBottom(x)
-                .ticks(7)
-                .tickSizeOuter(0)
-                .tickFormat((data.xTickFormat ?? null) as any)
-        );
+        .call((selection) =>
+            selection.transition(trans).call(
+                axisBottom(x)
+                    .ticks(7)
+                    .tickSizeOuter(0)
+                    .tickFormat((data.xTickFormat ?? null) as any)
+            )
+        )
+        .attr("direction", "ltr");
 
     // y scale
 
@@ -74,12 +77,14 @@ export function histogramGraph(
         .domain([0, yMax])
         .nice();
     svg.select<SVGGElement>(".y-ticks")
-        .transition(trans)
-        .call(
-            axisLeft(y)
-                .ticks(bounds.height / 50)
-                .tickSizeOuter(0)
-        );
+        .call((selection) =>
+            selection.transition(trans).call(
+                axisLeft(y)
+                    .ticks(bounds.height / 50)
+                    .tickSizeOuter(0)
+            )
+        )
+        .attr("direction", "ltr");
 
     // x bars
 
@@ -126,14 +131,16 @@ export function histogramGraph(
 
     if (data.showArea && data.bins.length && areaData.slice(-1)[0]) {
         svg.select<SVGGElement>(".y2-ticks")
-            .transition(trans)
-            .call(
-                axisRight(yAreaScale)
-                    .ticks(bounds.height / 50)
-                    .tickSizeOuter(0)
-            );
+            .call((selection) =>
+                selection.transition(trans).call(
+                    axisRight(yAreaScale)
+                        .ticks(bounds.height / 50)
+                        .tickSizeOuter(0)
+                )
+            )
+            .attr("direction", "ltr");
 
-        svg.select("path.area")
+        svg.select("path.cumulative-overlay")
             .datum(areaData as any)
             .attr(
                 "d",
@@ -151,17 +158,13 @@ export function histogramGraph(
             );
     }
 
-    const hoverData: [
-        Bin<number, number>,
-        number
-    ][] = data.bins.map((bin: Bin<number, number>, index: number) => [
-        bin,
-        areaData[index + 1],
-    ]);
+    const hoverData: [Bin<number, number>, number][] = data.bins.map(
+        (bin: Bin<number, number>, index: number) => [bin, areaData[index + 1]]
+    );
 
     // hover/tooltip
     const hoverzone = svg
-        .select("g.hoverzone")
+        .select("g.hover-columns")
         .selectAll("rect")
         .data(hoverData)
         .join("rect")
@@ -179,7 +182,7 @@ export function histogramGraph(
     if (data.onClick) {
         hoverzone
             .filter(([bin]) => bin.length > 0)
-            .attr("class", "clickable")
+            .attr("class", clickableClass)
             .on("click", (_event, [bin]) => data.onClick!(bin));
     }
 }

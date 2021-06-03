@@ -1,19 +1,21 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::SqliteStorage;
-use crate::err::Result;
-use crate::{
-    backend_proto as pb,
-    prelude::*,
-    revlog::{RevlogEntry, RevlogReviewKind},
-};
+use std::convert::TryFrom;
+
 use rusqlite::{
     params,
     types::{FromSql, FromSqlError, ValueRef},
     Row, NO_PARAMS,
 };
-use std::convert::TryFrom;
+
+use super::SqliteStorage;
+use crate::{
+    backend_proto as pb,
+    error::Result,
+    prelude::*,
+    revlog::{RevlogEntry, RevlogReviewKind},
+};
 
 pub(crate) struct StudiedToday {
     pub cards: u32,
@@ -64,7 +66,7 @@ impl SqliteStorage {
         &self,
         entry: &RevlogEntry,
         ensure_unique: bool,
-    ) -> Result<RevlogID> {
+    ) -> Result<RevlogId> {
         self.db
             .prepare_cached(include_str!("add.sql"))?
             .execute(params![
@@ -79,10 +81,10 @@ impl SqliteStorage {
                 entry.taken_millis,
                 entry.review_kind as u8
             ])?;
-        Ok(RevlogID(self.db.last_insert_rowid()))
+        Ok(RevlogId(self.db.last_insert_rowid()))
     }
 
-    pub(crate) fn get_revlog_entry(&self, id: RevlogID) -> Result<Option<RevlogEntry>> {
+    pub(crate) fn get_revlog_entry(&self, id: RevlogId) -> Result<Option<RevlogEntry>> {
         self.db
             .prepare_cached(concat!(include_str!("get.sql"), " where id=?"))?
             .query_and_then(&[id], row_to_revlog_entry)?
@@ -91,14 +93,14 @@ impl SqliteStorage {
     }
 
     /// Only intended to be used by the undo code, as Anki can not sync revlog deletions.
-    pub(crate) fn remove_revlog_entry(&self, id: RevlogID) -> Result<()> {
+    pub(crate) fn remove_revlog_entry(&self, id: RevlogId) -> Result<()> {
         self.db
             .prepare_cached("delete from revlog where id = ?")?
             .execute(&[id])?;
         Ok(())
     }
 
-    pub(crate) fn get_revlog_entries_for_card(&self, cid: CardID) -> Result<Vec<RevlogEntry>> {
+    pub(crate) fn get_revlog_entries_for_card(&self, cid: CardId) -> Result<Vec<RevlogEntry>> {
         self.db
             .prepare_cached(concat!(include_str!("get.sql"), " where cid=?"))?
             .query_and_then(&[cid], row_to_revlog_entry)?
@@ -133,11 +135,11 @@ impl SqliteStorage {
             .collect()
     }
 
-    pub(crate) fn studied_today(&self, day_cutoff: i64) -> Result<StudiedToday> {
-        let start = (day_cutoff - 86_400) * 1_000;
+    pub(crate) fn studied_today(&self, day_cutoff: TimestampSecs) -> Result<StudiedToday> {
+        let start = day_cutoff.adding_secs(-86_400).as_millis();
         self.db
             .prepare_cached(include_str!("studied_today.sql"))?
-            .query_map(&[start, RevlogReviewKind::Manual as i64], |row| {
+            .query_map(&[start.0, RevlogReviewKind::Manual as i64], |row| {
                 Ok(StudiedToday {
                     cards: row.get(0)?,
                     seconds: row.get(1)?,

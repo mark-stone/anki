@@ -1,21 +1,17 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::DeckID;
-use super::{
-    human_deck_name_to_native, Deck, DeckCommon, DeckKind, FilteredDeck, FilteredSearchTerm,
-    NormalDeck,
-};
-use crate::{
-    serde::{default_on_invalid, deserialize_bool_from_anything, deserialize_number_from_string},
-    timestamp::TimestampSecs,
-    types::Usn,
-};
+use std::collections::HashMap;
 
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_tuple::Serialize_tuple;
-use std::collections::HashMap;
+
+use super::{DeckCommon, FilteredDeck, FilteredSearchTerm, NormalDeck};
+use crate::{
+    prelude::*,
+    serde::{default_on_invalid, deserialize_bool_from_anything, deserialize_number_from_string},
+};
 
 #[derive(Serialize, PartialEq, Debug, Clone)]
 #[serde(untagged)]
@@ -26,9 +22,10 @@ pub enum DeckSchema11 {
 
 // serde doesn't support integer/bool enum tags, so we manually pick the correct variant
 mod dynfix {
-    use super::{DeckSchema11, FilteredDeckSchema11, NormalDeckSchema11};
     use serde::de::{self, Deserialize, Deserializer};
     use serde_json::{Map, Value};
+
+    use super::{DeckSchema11, FilteredDeckSchema11, NormalDeckSchema11};
 
     impl<'de> Deserialize<'de> for DeckSchema11 {
         fn deserialize<D>(deserializer: D) -> Result<DeckSchema11, D::Error>
@@ -82,7 +79,7 @@ fn is_false(b: &bool) -> bool {
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 pub struct DeckCommonSchema11 {
     #[serde(deserialize_with = "deserialize_number_from_string")]
-    pub(crate) id: DeckID,
+    pub(crate) id: DeckId,
     #[serde(
         rename = "mod",
         deserialize_with = "deserialize_number_from_string",
@@ -195,7 +192,7 @@ impl DeckSchema11 {
     //     }
     // }
 
-    pub fn id(&self) -> DeckID {
+    pub fn id(&self) -> DeckId {
         self.common().id
     }
 
@@ -214,7 +211,7 @@ impl Default for NormalDeckSchema11 {
     fn default() -> Self {
         NormalDeckSchema11 {
             common: DeckCommonSchema11 {
-                id: DeckID(0),
+                id: DeckId(0),
                 mtime: TimestampSecs(0),
                 name: "".to_string(),
                 usn: Usn(0),
@@ -240,7 +237,7 @@ impl From<DeckSchema11> for Deck {
         match deck {
             DeckSchema11::Normal(d) => Deck {
                 id: d.common.id,
-                name: human_deck_name_to_native(&d.common.name),
+                name: NativeDeckName::from_human_name(&d.common.name),
                 mtime_secs: d.common.mtime,
                 usn: d.common.usn,
                 common: (&d.common).into(),
@@ -248,7 +245,7 @@ impl From<DeckSchema11> for Deck {
             },
             DeckSchema11::Filtered(d) => Deck {
                 id: d.common.id,
-                name: human_deck_name_to_native(&d.common.name),
+                name: NativeDeckName::from_human_name(&d.common.name),
                 mtime_secs: d.common.mtime,
                 usn: d.common.usn,
                 common: (&d.common).into(),
@@ -363,7 +360,7 @@ impl From<Deck> for DeckCommonSchema11 {
         DeckCommonSchema11 {
             id: deck.id,
             mtime: deck.mtime_secs,
-            name: deck.name.replace("\x1f", "::"),
+            name: deck.human_name(),
             usn: deck.usn,
             today: (&deck).into(),
             study_collapsed: deck.common.study_collapsed,

@@ -1,5 +1,8 @@
 # Copyright: Ankitects Pty Ltd and contributors
 # License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
+from __future__ import annotations
+
 import base64
 import html
 import itertools
@@ -24,16 +27,17 @@ from anki.collection import Config, SearchNode
 from anki.consts import MODEL_CLOZE
 from anki.hooks import runFilter
 from anki.httpclient import HttpClient
-from anki.notes import Note
+from anki.notes import DuplicateOrEmptyResult, Note
 from anki.utils import checksum, isLin, isWin, namedtmp
 from aqt import AnkiQt, colors, gui_hooks
-from aqt.main import ResetReason
+from aqt.operations import QueryOp
+from aqt.operations.note import update_note
 from aqt.qt import *
 from aqt.sound import av_player
 from aqt.theme import theme_manager
 from aqt.utils import (
-    TR,
     HelpPage,
+    KeyboardModifiersPressed,
     disable_help_button,
     getFile,
     openHelp,
@@ -73,25 +77,23 @@ audio = (
 )
 
 _html = """
-<style>
-:root {
-    --bg-color: %s;
-}
-</style>
-<div>
-    <div id="topbutsOuter">
-        %s
-    </div>
-    <div id="fields">
-    </div>
-    <div id="dupes" class="is-inactive">
-        <a href="#" onclick="pycmd('dupes');return false;">%s</a>
-    </div>
+<div id="fields"></div>
+<div id="dupes" class="is-inactive">
+    <a href="#" onclick="pycmd('dupes');return false;">%s</a>
 </div>
 """
 
-# caller is responsible for resetting note on reset
+
 class Editor:
+    """The screen that embeds an editing widget should listen for changes via
+    the `operation_did_execute` hook, and call set_note() when the editor needs
+    redrawing.
+
+    The editor will cause that hook to be fired when it saves changes. To avoid
+    an unwanted refresh, the parent widget should check if handler
+    corresponds to this editor instance, and ignore the change if it does.
+    """
+
     def __init__(
         self, mw: AnkiQt, widget: QWidget, parentWindow: QWidget, addMode: bool = False
     ) -> None:
@@ -125,113 +127,49 @@ class Editor:
         self.web.set_bridge_command(self.onBridgeCmd, self)
         self.outerLayout.addWidget(self.web, 1)
 
-        lefttopbtns: List[str] = [
-            self._addButton(
-                None,
-                "fields",
-                tr(TR.EDITING_CUSTOMIZE_FIELDS),
-                f"{tr(TR.EDITING_FIELDS)}...",
-                disables=False,
-                rightside=False,
-            ),
-            self._addButton(
-                None,
-                "cards",
-                tr(TR.EDITING_CUSTOMIZE_CARD_TEMPLATES_CTRLANDL),
-                f"{tr(TR.EDITING_CARDS)}...",
-                disables=False,
-                rightside=False,
-            ),
-        ]
-
-        gui_hooks.editor_did_init_left_buttons(lefttopbtns, self)
-
-        righttopbtns: List[str] = [
-            self._addButton(
-                "text_bold", "bold", tr(TR.EDITING_BOLD_TEXT_CTRLANDB), id="bold"
-            ),
-            self._addButton(
-                "text_italic",
-                "italic",
-                tr(TR.EDITING_ITALIC_TEXT_CTRLANDI),
-                id="italic",
-            ),
-            self._addButton(
-                "text_under",
-                "underline",
-                tr(TR.EDITING_UNDERLINE_TEXT_CTRLANDU),
-                id="underline",
-            ),
-            self._addButton(
-                "text_super",
-                "super",
-                tr(TR.EDITING_SUPERSCRIPT_CTRLANDAND),
-                id="superscript",
-            ),
-            self._addButton(
-                "text_sub", "sub", tr(TR.EDITING_SUBSCRIPT_CTRLAND), id="subscript"
-            ),
-            self._addButton(
-                "text_clear", "clear", tr(TR.EDITING_REMOVE_FORMATTING_CTRLANDR)
-            ),
-            self._addButton(
-                None,
-                "colour",
-                tr(TR.EDITING_SET_FOREGROUND_COLOUR_F7),
-                """
-<span id="forecolor" class="topbut rounded" style="background: #000"></span>
-""",
-            ),
-            self._addButton(
-                None,
-                "changeCol",
-                tr(TR.EDITING_CHANGE_COLOUR_F8),
-                """
-<span class="topbut rounded rainbow"></span>
-""",
-            ),
-            self._addButton(
-                "text_cloze", "cloze", tr(TR.EDITING_CLOZE_DELETION_CTRLANDSHIFTANDC)
-            ),
-            self._addButton(
-                "paperclip", "attach", tr(TR.EDITING_ATTACH_PICTURESAUDIOVIDEO_F3)
-            ),
-            self._addButton("media-record", "record", tr(TR.EDITING_RECORD_AUDIO_F5)),
-            self._addButton("more", "more"),
-        ]
-
-        gui_hooks.editor_did_init_buttons(righttopbtns, self)
-        # legacy filter
-        righttopbtns = runFilter("setupEditorButtons", righttopbtns, self)
-
-        topbuts = """
-            <div id="topbutsleft" class="topbuts">
-                %(leftbts)s
-            </div>
-            <div id="topbutsright" class="topbuts">
-                %(rightbts)s
-            </div>
-        """ % dict(
-            leftbts="".join(lefttopbtns),
-            rightbts="".join(righttopbtns),
-        )
-        bgcol = self.mw.app.palette().window().color().name()  # type: ignore
         # then load page
         self.web.stdHtml(
-            _html % (bgcol, topbuts, tr(TR.EDITING_SHOW_DUPLICATES)),
+            _html % tr.editing_show_duplicates(),
             css=[
-                "css/vendor/bootstrap.min.css",
-                "css/vendor/bootstrap-icons.css",
                 "css/editor.css",
             ],
             js=[
                 "js/vendor/jquery.min.js",
-                "js/vendor/bootstrap.bundle.min.js",
+                "js/vendor/protobuf.min.js",
                 "js/editor.js",
             ],
             context=self,
+            default_css=True,
         )
-        self.web.eval("preventButtonFocus();")
+
+        lefttopbtns: List[str] = []
+        gui_hooks.editor_did_init_left_buttons(lefttopbtns, self)
+
+        lefttopbtns_defs = [
+            f"$editorToolbar.then(({{ notetypeButtons }}) => notetypeButtons.appendButton({{ component: editorToolbar.Raw, props: {{ html: {json.dumps(button)} }} }}, -1));"
+            for button in lefttopbtns
+        ]
+        lefttopbtns_js = "\n".join(lefttopbtns_defs)
+
+        righttopbtns: List[str] = []
+        gui_hooks.editor_did_init_buttons(righttopbtns, self)
+        # legacy filter
+        righttopbtns = runFilter("setupEditorButtons", righttopbtns, self)
+
+        righttopbtns_defs = ", ".join([json.dumps(button) for button in righttopbtns])
+        righttopbtns_js = (
+            f"""
+$editorToolbar.then(({{ toolbar }}) => toolbar.appendGroup({{
+    component: editorToolbar.AddonButtons,
+    id: "addons",
+    props: {{ buttons: [ {righttopbtns_defs} ] }},
+}}));
+"""
+            if len(righttopbtns) > 0
+            else ""
+        )
+
+        self.web.eval(f"{lefttopbtns_js} {righttopbtns_js}")
 
     # Top buttons
     ######################################################################
@@ -343,6 +281,7 @@ class Editor:
                         type="button"
                         title="{tip}"
                         onclick="pycmd('{cmd}');{togglesc}return false;"
+                        onmousedown="window.event.preventDefault();"
                 >
                     {imgelm}
                     {labelelm}
@@ -359,26 +298,6 @@ class Editor:
     def setupShortcuts(self) -> None:
         # if a third element is provided, enable shortcut even when no field selected
         cuts: List[Tuple] = [
-            ("Ctrl+L", self.onCardLayout, True),
-            ("Ctrl+B", self.toggleBold),
-            ("Ctrl+I", self.toggleItalic),
-            ("Ctrl+U", self.toggleUnderline),
-            ("Ctrl++", self.toggleSuper),
-            ("Ctrl+=", self.toggleSub),
-            ("Ctrl+R", self.removeFormat),
-            ("F7", self.onForeground),
-            ("F8", self.onChangeCol),
-            ("Ctrl+Shift+C", self.onCloze),
-            ("Ctrl+Shift+Alt+C", self.onCloze),
-            ("F3", self.onAddMedia),
-            ("F5", self.onRecSound),
-            ("Ctrl+T, T", self.insertLatex),
-            ("Ctrl+T, E", self.insertLatexEqn),
-            ("Ctrl+T, M", self.insertLatexMathEnv),
-            ("Ctrl+M, M", self.insertMathjaxInline),
-            ("Ctrl+M, E", self.insertMathjaxBlock),
-            ("Ctrl+M, C", self.insertMathjaxChemistry),
-            ("Ctrl+Shift+X", self.onHtmlEdit),
             ("Ctrl+Shift+T", self.onFocusTags, True),
         ]
         gui_hooks.editor_did_init_shortcuts(cuts, self)
@@ -399,7 +318,7 @@ class Editor:
         return checkFocus
 
     def onFields(self) -> None:
-        self.saveNow(self._onFields)
+        self.call_after_note_saved(self._onFields)
 
     def _onFields(self) -> None:
         from aqt.fields import FieldDialog
@@ -407,7 +326,7 @@ class Editor:
         FieldDialog(self.mw, self.note.model(), parent=self.parentWindow)
 
     def onCardLayout(self) -> None:
-        self.saveNow(self._onCardLayout)
+        self.call_after_note_saved(self._onCardLayout)
 
     def _onCardLayout(self) -> None:
         from aqt.clayout import CardLayout
@@ -450,7 +369,6 @@ class Editor:
 
             if not self.addMode:
                 self._save_current_note()
-                self.mw.requireReset(reason=ResetReason.EditorBridgeCmd, context=self)
             if type == "blur":
                 self.currentField = None
                 # run any filters
@@ -459,10 +377,10 @@ class Editor:
                     # event has had time to fire
                     self.mw.progress.timer(100, self.loadNoteKeepingFocus, False)
                 else:
-                    self.checkValid()
+                    self._check_and_update_duplicate_display_async()
             else:
                 gui_hooks.editor_did_fire_typing_timer(self.note)
-                self.checkValid()
+                self._check_and_update_duplicate_display_async()
 
         # focused into field?
         elif cmd.startswith("focus"):
@@ -492,7 +410,7 @@ class Editor:
     # Setting/unsetting the current note
     ######################################################################
 
-    def setNote(
+    def set_note(
         self, note: Optional[Note], hide: bool = True, focusTo: Optional[int] = None
     ) -> None:
         "Make NOTE the current note."
@@ -519,11 +437,15 @@ class Editor:
         self.widget.show()
         self.updateTags()
 
+        dupe_status = self.note.duplicate_or_empty()
+
         def oncallback(arg: Any) -> None:
             if not self.note:
                 return
             self.setupForegroundButton()
-            self.checkValid()
+            # we currently do this synchronously to ensure we load before the
+            # sidebar on browser startup
+            self._update_duplicate_display(dupe_status)
             if focusTo is not None:
                 self.web.setFocus()
             gui_hooks.editor_did_load_note(self)
@@ -544,7 +466,9 @@ class Editor:
 
     def _save_current_note(self) -> None:
         "Call after note is updated with data from webview."
-        self.mw.col.update_note(self.note)
+        update_note(parent=self.widget, note=self.note).run_in_background(
+            initiator=self
+        )
 
     def fonts(self) -> List[Tuple[str, int, bool]]:
         return [
@@ -552,19 +476,40 @@ class Editor:
             for f in self.note.model()["flds"]
         ]
 
-    def saveNow(self, callback: Callable, keepFocus: bool = False) -> None:
+    def call_after_note_saved(
+        self, callback: Callable, keepFocus: bool = False
+    ) -> None:
         "Save unsaved edits then call callback()."
         if not self.note:
             # calling code may not expect the callback to fire immediately
             self.mw.progress.timer(10, callback, False)
             return
-        self.saveTags()
+        self.blur_tags_if_focused()
         self.web.evalWithCallback("saveNow(%d)" % keepFocus, lambda res: callback())
 
-    def checkValid(self) -> None:
+    saveNow = call_after_note_saved
+
+    def _check_and_update_duplicate_display_async(self) -> None:
+        note = self.note
+        if not note:
+            return
+
+        def on_done(result: DuplicateOrEmptyResult.V) -> None:
+            if self.note != note:
+                return
+            self._update_duplicate_display(result)
+
+        QueryOp(
+            parent=self.parentWindow,
+            op=lambda _: note.duplicate_or_empty(),
+            success=on_done,
+        ).run_in_background()
+
+    checkValid = _check_and_update_duplicate_display_async
+
+    def _update_duplicate_display(self, result: DuplicateOrEmptyResult.V) -> None:
         cols = [""] * len(self.note.fields)
-        err = self.note.duplicate_or_empty()
-        if err == 2:
+        if result == DuplicateOrEmptyResult.DUPLICATE:
             cols[0] = "dupe"
 
         self.web.eval(f"setBackgrounds({json.dumps(cols)});")
@@ -597,16 +542,20 @@ class Editor:
         return True
 
     def cleanup(self) -> None:
-        self.setNote(None)
+        self.set_note(None)
         # prevent any remaining evalWithCallback() events from firing after C++ object deleted
         self.web = None
+
+    # legacy
+
+    setNote = set_note
 
     # HTML editing
     ######################################################################
 
     def onHtmlEdit(self) -> None:
         field = self.currentField
-        self.saveNow(lambda: self._onHtmlEdit(field))
+        self.call_after_note_saved(lambda: self._onHtmlEdit(field))
 
     def _onHtmlEdit(self, field: int) -> None:
         d = QDialog(self.widget, Qt.Window)
@@ -653,13 +602,11 @@ class Editor:
         tb.setSpacing(12)
         tb.setContentsMargins(2, 6, 2, 6)
         # tags
-        l = QLabel(tr(TR.EDITING_TAGS))
+        l = QLabel(tr.editing_tags())
         tb.addWidget(l, 1, 0)
         self.tags = aqt.tagedit.TagEdit(self.widget)
-        qconnect(self.tags.lostFocus, self.saveTags)
-        self.tags.setToolTip(
-            shortcut(tr(TR.EDITING_JUMP_TO_TAGS_WITH_CTRLANDSHIFTANDT))
-        )
+        qconnect(self.tags.lostFocus, self.on_tag_focus_lost)
+        self.tags.setToolTip(shortcut(tr.editing_jump_to_tags_with_ctrlandshiftandt()))
         border = theme_manager.color(colors.BORDER)
         self.tags.setStyleSheet(f"border: 1px solid {border}")
         tb.addWidget(self.tags, 1, 1)
@@ -672,13 +619,17 @@ class Editor:
         if not self.tags.text() or not self.addMode:
             self.tags.setText(self.note.stringTags().strip())
 
-    def saveTags(self) -> None:
-        if not self.note:
-            return
+    def on_tag_focus_lost(self) -> None:
         self.note.tags = self.mw.col.tags.split(self.tags.text())
+        gui_hooks.editor_did_update_tags(self.note)
         if not self.addMode:
             self._save_current_note()
-        gui_hooks.editor_did_update_tags(self.note)
+
+    def blur_tags_if_focused(self) -> None:
+        if not self.note:
+            return
+        if self.tags.hasFocus():
+            self.widget.setFocus()
 
     def hideCompleters(self) -> None:
         self.tags.hideCompleter()
@@ -687,8 +638,11 @@ class Editor:
         self.tags.setFocus()
 
     # legacy
+
     def saveAddModeVars(self) -> None:
         pass
+
+    saveTags = blur_tags_if_focused
 
     # Format buttons
     ######################################################################
@@ -712,15 +666,15 @@ class Editor:
         self.web.eval("setFormat('removeFormat');")
 
     def onCloze(self) -> None:
-        self.saveNow(self._onCloze, keepFocus=True)
+        self.call_after_note_saved(self._onCloze, keepFocus=True)
 
     def _onCloze(self) -> None:
         # check that the model is set up for cloze deletion
         if self.note.model()["type"] != MODEL_CLOZE:
             if self.addMode:
-                tooltip(tr(TR.EDITING_WARNING_CLOZE_DELETIONS_WILL_NOT_WORK))
+                tooltip(tr.editing_warning_cloze_deletions_will_not_work())
             else:
-                showInfo(tr(TR.EDITING_TO_MAKE_A_CLOZE_DELETION_ON))
+                showInfo(tr.editing_to_make_a_cloze_deletion_on())
                 return
         # find the highest existing cloze
         highest = 0
@@ -729,7 +683,7 @@ class Editor:
             if m:
                 highest = max(highest, sorted([int(x) for x in m])[-1])
         # reuse last?
-        if not self.mw.app.keyboardModifiers() & Qt.AltModifier:
+        if not KeyboardModifiersPressed().alt:
             highest += 1
         # must start at 1
         highest = max(1, highest)
@@ -762,7 +716,8 @@ class Editor:
             self._wrapWithColour(self.fcolour)
 
     def _updateForegroundButton(self) -> None:
-        self.web.eval(f"setFGButton('{self.fcolour}')")
+        # self.web.eval(f"setFGButton('{self.fcolour}')")
+        pass
 
     def onColourChanged(self) -> None:
         self._updateForegroundButton()
@@ -778,14 +733,14 @@ class Editor:
         extension_filter = " ".join(
             f"*.{extension}" for extension in sorted(itertools.chain(pics, audio))
         )
-        filter = f"{tr(TR.EDITING_MEDIA)} ({extension_filter})"
+        filter = f"{tr.editing_media()} ({extension_filter})"
 
         def accept(file: str) -> None:
             self.addMedia(file)
 
         file = getFile(
             parent=self.widget,
-            title=tr(TR.EDITING_ADD_MEDIA),
+            title=tr.editing_add_media(),
             cb=cast(Callable[[Any], None], accept),
             filter=filter,
             key="media",
@@ -909,15 +864,14 @@ class Editor:
                     client.timeout = 30
                     with client.get(url) as response:
                         if response.status_code != 200:
-                            error_msg = tr(
-                                TR.QT_MISC_UNEXPECTED_RESPONSE_CODE,
+                            error_msg = tr.qt_misc_unexpected_response_code(
                                 val=response.status_code,
                             )
                             return None
                         filecontents = response.content
                         content_type = response.headers.get("content-type")
         except (urllib.error.URLError, requests.exceptions.RequestException) as e:
-            error_msg = tr(TR.EDITING_AN_ERROR_OCCURRED_WHILE_OPENING, val=str(e))
+            error_msg = tr.editing_an_error_occurred_while_opening(val=str(e))
             return None
         finally:
             self.mw.progress.finish()
@@ -1012,17 +966,17 @@ class Editor:
         m = QMenu(self.mw)
 
         for text, handler, shortcut in (
-            (tr(TR.EDITING_MATHJAX_INLINE), self.insertMathjaxInline, "Ctrl+M, M"),
-            (tr(TR.EDITING_MATHJAX_BLOCK), self.insertMathjaxBlock, "Ctrl+M, E"),
+            (tr.editing_mathjax_inline(), self.insertMathjaxInline, "Ctrl+M, M"),
+            (tr.editing_mathjax_block(), self.insertMathjaxBlock, "Ctrl+M, E"),
             (
-                tr(TR.EDITING_MATHJAX_CHEMISTRY),
+                tr.editing_mathjax_chemistry(),
                 self.insertMathjaxChemistry,
                 "Ctrl+M, C",
             ),
-            (tr(TR.EDITING_LATEX), self.insertLatex, "Ctrl+T, T"),
-            (tr(TR.EDITING_LATEX_EQUATION), self.insertLatexEqn, "Ctrl+T, E"),
-            (tr(TR.EDITING_LATEX_MATH_ENV), self.insertLatexMathEnv, "Ctrl+T, M"),
-            (tr(TR.EDITING_EDIT_HTML), self.onHtmlEdit, "Ctrl+Shift+X"),
+            (tr.editing_latex(), self.insertLatex, "Ctrl+T, T"),
+            (tr.editing_latex_equation(), self.insertLatexEqn, "Ctrl+T, E"),
+            (tr.editing_latex_math_env(), self.insertLatexMathEnv, "Ctrl+T, M"),
+            (tr.editing_edit_html(), self.onHtmlEdit, "Ctrl+Shift+X"),
         ):
             a = m.addAction(text)
             qconnect(a.triggered, handler)
@@ -1074,6 +1028,10 @@ class Editor:
         dupes=showDupes,
         paste=onPaste,
         cutOrCopy=onCutOrCopy,
+        htmlEdit=onHtmlEdit,
+        mathjaxInline=insertMathjaxInline,
+        mathjaxBlock=insertMathjaxBlock,
+        mathjaxChemistry=insertMathjaxChemistry,
     )
 
 
@@ -1106,9 +1064,9 @@ class EditorWebView(AnkiWebView):
         strip_html = self.editor.mw.col.get_config_bool(
             Config.Bool.PASTE_STRIPS_FORMATTING
         )
-        if self.editor.mw.app.queryKeyboardModifiers() & Qt.ShiftModifier:
+        if KeyboardModifiersPressed().shift:
             strip_html = not strip_html
-        return strip_html
+        return not strip_html
 
     def _onPaste(self, mode: QClipboard.Mode) -> None:
         extended = self._wantsExtendedPaste()
@@ -1273,11 +1231,11 @@ class EditorWebView(AnkiWebView):
 
     def contextMenuEvent(self, evt: QContextMenuEvent) -> None:
         m = QMenu(self)
-        a = m.addAction(tr(TR.EDITING_CUT))
+        a = m.addAction(tr.editing_cut())
         qconnect(a.triggered, self.onCut)
-        a = m.addAction(tr(TR.ACTIONS_COPY))
+        a = m.addAction(tr.actions_copy())
         qconnect(a.triggered, self.onCopy)
-        a = m.addAction(tr(TR.EDITING_PASTE))
+        a = m.addAction(tr.editing_paste())
         qconnect(a.triggered, self.onPaste)
         gui_hooks.editor_will_show_context_menu(self, m)
         m.popup(QCursor.pos())
@@ -1308,3 +1266,17 @@ gui_hooks.editor_will_use_font_for_field.append(fontMungeHack)
 gui_hooks.editor_will_munge_html.append(munge_html)
 gui_hooks.editor_will_munge_html.append(remove_null_bytes)
 gui_hooks.editor_will_munge_html.append(reverse_url_quoting)
+
+
+def set_cloze_button(editor: Editor) -> None:
+    if editor.note.model()["type"] == MODEL_CLOZE:
+        editor.web.eval(
+            '$editorToolbar.then(({ templateButtons }) => templateButtons.showButton("cloze")); '
+        )
+    else:
+        editor.web.eval(
+            '$editorToolbar.then(({ templateButtons }) => templateButtons.hideButton("cloze")); '
+        )
+
+
+gui_hooks.editor_did_load_note.append(set_cloze_button)

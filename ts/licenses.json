@@ -7,6 +7,21 @@
         "path": "node_modules/@fluent/bundle",
         "licenseFile": "node_modules/@fluent/bundle/README.md"
     },
+    "@mdi/svg@5.9.55": {
+        "licenses": "Apache-2.0",
+        "repository": "https://github.com/Templarian/MaterialDesign-SVG",
+        "publisher": "Austin Andrews",
+        "path": "node_modules/@mdi/svg",
+        "licenseFile": "node_modules/@mdi/svg/LICENSE"
+    },
+    "@popperjs/core@2.9.2": {
+        "licenses": "MIT",
+        "repository": "https://github.com/popperjs/popper-core",
+        "publisher": "Federico Zivolo",
+        "email": "federico.zivolo@gmail.com",
+        "path": "node_modules/@popperjs/core",
+        "licenseFile": "node_modules/@popperjs/core/LICENSE.md"
+    },
     "@protobufjs/aspromise@1.1.2": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/dcodeIO/protobuf.js",
@@ -87,26 +102,44 @@
         "path": "node_modules/@protobufjs/utf8",
         "licenseFile": "node_modules/@protobufjs/utf8/LICENSE"
     },
+    "@types/lodash-es@4.17.4": {
+        "licenses": "MIT",
+        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+        "path": "node_modules/@types/lodash-es",
+        "licenseFile": "node_modules/@types/lodash-es/LICENSE"
+    },
+    "@types/lodash@4.14.170": {
+        "licenses": "MIT",
+        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+        "path": "node_modules/@types/lodash",
+        "licenseFile": "node_modules/@types/lodash/LICENSE"
+    },
     "@types/long@4.0.1": {
         "licenses": "MIT",
         "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
         "path": "node_modules/@types/long",
         "licenseFile": "node_modules/@types/long/LICENSE"
     },
-    "@types/node@13.13.40": {
+    "@types/marked@2.0.3": {
+        "licenses": "MIT",
+        "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+        "path": "node_modules/@types/marked",
+        "licenseFile": "node_modules/@types/marked/LICENSE"
+    },
+    "@types/node@15.6.1": {
         "licenses": "MIT",
         "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
         "path": "node_modules/protobufjs/node_modules/@types/node",
         "licenseFile": "node_modules/protobufjs/node_modules/@types/node/LICENSE"
     },
-    "bootstrap-icons@1.4.0": {
+    "bootstrap-icons@1.5.0": {
         "licenses": "MIT",
         "repository": "https://github.com/twbs/icons",
         "publisher": "mdo",
         "path": "node_modules/bootstrap-icons",
         "licenseFile": "node_modules/bootstrap-icons/LICENSE.md"
     },
-    "bootstrap@5.0.0-beta2": {
+    "bootstrap@5.0.0-beta3": {
         "licenses": "MIT",
         "repository": "https://github.com/twbs/bootstrap",
         "publisher": "The Bootstrap Authors",
@@ -129,7 +162,7 @@
         "path": "node_modules/css-browser-selector",
         "licenseFile": "node_modules/css-browser-selector/README.mkdn"
     },
-    "d3-array@2.11.0": {
+    "d3-array@2.12.1": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/d3/d3-array",
         "publisher": "Mike Bostock",
@@ -137,7 +170,7 @@
         "path": "node_modules/d3-array",
         "licenseFile": "node_modules/d3-array/LICENSE"
     },
-    "d3-axis@2.0.0": {
+    "d3-axis@2.1.0": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/d3/d3-axis",
         "publisher": "Mike Bostock",
@@ -305,7 +338,7 @@
         "path": "node_modules/d3-scale-chromatic",
         "licenseFile": "node_modules/d3-scale-chromatic/LICENSE"
     },
-    "d3-scale@3.2.3": {
+    "d3-scale@3.3.0": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/d3/d3-scale",
         "publisher": "Mike Bostock",
@@ -321,7 +354,7 @@
         "path": "node_modules/d3-selection",
         "licenseFile": "node_modules/d3-selection/LICENSE"
     },
-    "d3-shape@2.0.0": {
+    "d3-shape@2.1.0": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/d3/d3-shape",
         "publisher": "Mike Bostock",
@@ -337,7 +370,7 @@
         "path": "node_modules/d3-time-format",
         "licenseFile": "node_modules/d3-time-format/LICENSE"
     },
-    "d3-time@2.0.0": {
+    "d3-time@2.1.1": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/d3/d3-time",
         "publisher": "Mike Bostock",
@@ -369,7 +402,7 @@
         "path": "node_modules/d3-zoom",
         "licenseFile": "node_modules/d3-zoom/LICENSE"
     },
-    "d3@6.5.0": {
+    "d3@6.7.0": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/d3/d3",
         "publisher": "Mike Bostock",
@@ -392,7 +425,7 @@
         "path": "node_modules/iconv-lite",
         "licenseFile": "node_modules/iconv-lite/LICENSE"
     },
-    "internmap@1.0.0": {
+    "internmap@1.0.1": {
         "licenses": "ISC",
         "repository": "https://github.com/mbostock/internmap",
         "publisher": "Mike Bostock",
@@ -416,31 +449,21 @@
         "path": "node_modules/jquery-ui-dist",
         "licenseFile": "node_modules/jquery-ui-dist/LICENSE.txt"
     },
-    "jquery@3.5.1": {
+    "jquery@3.6.0": {
         "licenses": "MIT",
         "repository": "https://github.com/jquery/jquery",
-        "publisher": "JS Foundation and other contributors",
-        "url": "https://github.com/jquery/jquery/blob/3.5.1/AUTHORS.txt",
+        "publisher": "OpenJS Foundation and other contributors",
+        "url": "https://github.com/jquery/jquery/blob/3.6.0/AUTHORS.txt",
         "path": "node_modules/jquery",
         "licenseFile": "node_modules/jquery/LICENSE.txt"
     },
-    "lodash.debounce@4.0.8": {
+    "lodash-es@4.17.21": {
         "licenses": "MIT",
         "repository": "https://github.com/lodash/lodash",
         "publisher": "John-David Dalton",
         "email": "john.david.dalton@gmail.com",
-        "url": "http://allyoucanleet.com/",
-        "path": "node_modules/lodash.debounce",
-        "licenseFile": "node_modules/lodash.debounce/LICENSE"
-    },
-    "lodash.throttle@4.1.1": {
-        "licenses": "MIT",
-        "repository": "https://github.com/lodash/lodash",
-        "publisher": "John-David Dalton",
-        "email": "john.david.dalton@gmail.com",
-        "url": "http://allyoucanleet.com/",
-        "path": "node_modules/lodash.throttle",
-        "licenseFile": "node_modules/lodash.throttle/LICENSE"
+        "path": "node_modules/lodash-es",
+        "licenseFile": "node_modules/lodash-es/LICENSE"
     },
     "long@4.0.0": {
         "licenses": "Apache-2.0",
@@ -450,13 +473,20 @@
         "path": "node_modules/long",
         "licenseFile": "node_modules/long/LICENSE"
     },
-    "mathjax@3.1.2": {
+    "marked@2.0.5": {
+        "licenses": "MIT",
+        "repository": "https://github.com/markedjs/marked",
+        "publisher": "Christopher Jeffrey",
+        "path": "node_modules/marked",
+        "licenseFile": "node_modules/marked/LICENSE.md"
+    },
+    "mathjax@3.1.4": {
         "licenses": "Apache-2.0",
         "repository": "https://github.com/mathjax/MathJax",
         "path": "node_modules/mathjax",
         "licenseFile": "node_modules/mathjax/LICENSE"
     },
-    "protobufjs@6.10.2": {
+    "protobufjs@6.11.2": {
         "licenses": "BSD-3-Clause",
         "repository": "https://github.com/protobufjs/protobuf.js",
         "publisher": "Daniel Wirtz",

@@ -27,7 +27,6 @@ img {
     right: 10px;
     top: 0;
     font-size: 30px;
-    display: none;
     -webkit-text-stroke-width: 1px;
     -webkit-text-stroke-color: black;
 }
@@ -38,7 +37,6 @@ img {
     top: 0;
     font-size: 30px;
     color: yellow;
-    display: none;
     -webkit-text-stroke-width: 1px;
     -webkit-text-stroke-color: black;
 }
@@ -49,15 +47,23 @@ img {
     box-sizing: border-box;
 }
 
+.night-mode #typeans {
+    background-color: var(--frame-bg);
+    color: var(--text-fg);
+}
+
 .typeGood {
-    background: #0f0;
+    background: #afa;
+    color: black;
 }
 
 .typeBad {
-    background: #f00;
+    color: black;
+    background: #faa;
 }
 
 .typeMissed {
+    color: black;
     background: #ccc;
 }
 
@@ -88,7 +94,9 @@ img {
     }
 }
 
-.drawing { zoom: 50%; }
+.drawing {
+    zoom: 50%;
+}
 .nightMode img.drawing {
-    filter: unquote("invert(1) hue-rotate(180deg)")
+    filter: unquote("invert(1) hue-rotate(180deg)");
 }

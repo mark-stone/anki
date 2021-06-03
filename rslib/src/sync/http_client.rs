@@ -1,36 +1,32 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::{server::SyncServer, SYNC_VERSION_MAX};
-use super::{
-    Chunk, FullSyncProgress, Graves, SanityCheckCounts, SanityCheckOut, SyncMeta, UnchunkedChanges,
-};
-use crate::prelude::*;
-use crate::{err::SyncErrorKind, notes::guid, version::sync_client_version};
+use std::{io::prelude::*, mem::MaybeUninit, path::Path, time::Duration};
+
 use async_trait::async_trait;
 use bytes::Bytes;
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use futures::Stream;
-use futures::StreamExt;
-use reqwest::Body;
-use reqwest::{multipart, Client, Response};
+use flate2::{write::GzEncoder, Compression};
+use futures::{Stream, StreamExt};
+use reqwest::{multipart, Body, Client, Response};
 use serde::de::DeserializeOwned;
-
-use super::http::{
-    ApplyChangesIn, ApplyChunkIn, ApplyGravesIn, HostKeyIn, HostKeyOut, MetaIn, SanityCheckIn,
-    StartIn, SyncRequest,
-};
-use std::io::prelude::*;
-use std::path::Path;
-use std::time::Duration;
 use tempfile::NamedTempFile;
+
+use super::{
+    http::{
+        ApplyChangesIn, ApplyChunkIn, ApplyGravesIn, HostKeyIn, HostKeyOut, MetaIn, SanityCheckIn,
+        StartIn, SyncRequest,
+    },
+    server::SyncServer,
+    Chunk, FullSyncProgress, Graves, SanityCheckCounts, SanityCheckOut, SyncMeta, UnchunkedChanges,
+    SYNC_VERSION_MAX,
+};
+use crate::{error::SyncErrorKind, notes::guid, prelude::*, version::sync_client_version};
 
 // fixme: 100mb limit
 
 pub type FullSyncProgressFn = Box<dyn FnMut(FullSyncProgress, bool) + Send + Sync + 'static>;
 
-pub struct HTTPSyncClient {
+pub struct HttpSyncClient {
     hkey: Option<String>,
     skey: String,
     client: Client,
@@ -62,7 +58,7 @@ impl Timeouts {
 }
 
 #[async_trait(?Send)]
-impl SyncServer for HTTPSyncClient {
+impl SyncServer for HttpSyncClient {
     async fn meta(&self) -> Result<SyncMeta> {
         let input = SyncRequest::Meta(MetaIn {
             sync_version: SYNC_VERSION_MAX,
@@ -135,7 +131,10 @@ impl SyncServer for HTTPSyncClient {
                 total_bytes,
             },
         };
-        let wrap2 = async_compression::stream::GzipEncoder::new(wrap1);
+        let wrap2 =
+            tokio_util::io::ReaderStream::new(async_compression::tokio::bufread::GzipEncoder::new(
+                tokio_util::io::StreamReader::new(wrap1),
+            ));
         let body = Body::wrap_stream(wrap2);
         self.upload_inner(body).await?;
 
@@ -175,8 +174,8 @@ impl SyncServer for HTTPSyncClient {
     }
 }
 
-impl HTTPSyncClient {
-    pub fn new(hkey: Option<String>, host_number: u32) -> HTTPSyncClient {
+impl HttpSyncClient {
+    pub fn new(hkey: Option<String>, host_number: u32) -> HttpSyncClient {
         let timeouts = Timeouts::new();
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(timeouts.connect_secs))
@@ -186,7 +185,7 @@ impl HTTPSyncClient {
             .unwrap();
         let skey = guid();
         let endpoint = sync_endpoint(host_number);
-        HTTPSyncClient {
+        HttpSyncClient {
             hkey,
             skey,
             client,
@@ -281,23 +280,21 @@ impl HTTPSyncClient {
         resp.error_for_status_ref()?;
         let text = resp.text().await?;
         if text != "OK" {
-            Err(AnkiError::SyncError {
-                info: text,
-                kind: SyncErrorKind::Other,
-            })
+            Err(AnkiError::sync_error(text, SyncErrorKind::Other))
         } else {
             Ok(())
         }
     }
 }
 
+use std::pin::Pin;
+
 use futures::{
     ready,
     task::{Context, Poll},
 };
 use pin_project::pin_project;
-use std::pin::Pin;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, ReadBuf};
 
 #[pin_project]
 struct ProgressWrapper<S, P> {
@@ -315,18 +312,21 @@ where
     type Item = std::result::Result<Bytes, std::io::Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut buf = vec![0; 16 * 1024];
+        let mut buf = [MaybeUninit::<u8>::uninit(); 8192];
+        let mut buf = ReadBuf::uninit(&mut buf);
         let this = self.project();
-        match ready!(this.reader.poll_read(cx, &mut buf)) {
-            Ok(0) => {
-                (this.progress_fn)(*this.progress, false);
-                Poll::Ready(None)
-            }
-            Ok(size) => {
-                buf.resize(size, 0);
-                this.progress.transferred_bytes += size;
-                (this.progress_fn)(*this.progress, true);
-                Poll::Ready(Some(Ok(Bytes::from(buf))))
+        let res = ready!(this.reader.poll_read(cx, &mut buf));
+        match res {
+            Ok(()) => {
+                let filled = buf.filled().to_vec();
+                Poll::Ready(if filled.is_empty() {
+                    (this.progress_fn)(*this.progress, false);
+                    None
+                } else {
+                    this.progress.transferred_bytes += filled.len();
+                    (this.progress_fn)(*this.progress, true);
+                    Some(Ok(Bytes::from(filled)))
+                })
             }
             Err(e) => Poll::Ready(Some(Err(e))),
         }
@@ -348,19 +348,23 @@ fn sync_endpoint(host_number: u32) -> String {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::{err::SyncErrorKind, sync::SanityCheckDueCounts};
     use tokio::runtime::Runtime;
 
+    use super::*;
+    use crate::{
+        error::{SyncError, SyncErrorKind},
+        sync::SanityCheckDueCounts,
+    };
+
     async fn http_client_inner(username: String, password: String) -> Result<()> {
-        let mut syncer = Box::new(HTTPSyncClient::new(None, 0));
+        let mut syncer = Box::new(HttpSyncClient::new(None, 0));
 
         assert!(matches!(
             syncer.login("nosuchuser", "nosuchpass").await,
-            Err(AnkiError::SyncError {
+            Err(AnkiError::SyncError(SyncError {
                 kind: SyncErrorKind::AuthFailed,
                 ..
-            })
+            }))
         ));
 
         assert!(syncer.login(&username, &password).await.is_ok());
@@ -370,10 +374,10 @@ mod test {
         // aborting before a start is a conflict
         assert!(matches!(
             syncer.abort().await,
-            Err(AnkiError::SyncError {
+            Err(AnkiError::SyncError(SyncError {
                 kind: SyncErrorKind::Conflict,
                 ..
-            })
+            }))
         ));
 
         let _graves = syncer.start(Usn(1), true, None).await?;
@@ -420,7 +424,7 @@ mod test {
         })));
         let out_path = syncer.full_download(None).await?;
 
-        let mut syncer = Box::new(HTTPSyncClient::new(None, 0));
+        let mut syncer = Box::new(HttpSyncClient::new(None, 0));
         syncer.set_full_sync_progress_fn(Some(Box::new(|progress, _throttle| {
             println!("progress {:?}", progress);
         })));
@@ -440,7 +444,7 @@ mod test {
         let pass = std::env::var("TEST_SYNC_PASS").unwrap();
         env_logger::init();
 
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(http_client_inner(user, pass))
     }
 }

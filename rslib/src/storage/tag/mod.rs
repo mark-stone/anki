@@ -1,11 +1,12 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use super::SqliteStorage;
-use crate::{err::Result, tags::Tag, types::Usn};
+use std::collections::HashMap;
 
 use rusqlite::{params, Row, NO_PARAMS};
-use std::collections::HashMap;
+
+use super::SqliteStorage;
+use crate::{error::Result, tags::Tag, types::Usn};
 
 fn row_to_tag(row: &Row) -> Result<Tag> {
     Ok(Tag {
@@ -19,7 +20,7 @@ impl SqliteStorage {
     /// All tags in the collection, in alphabetical order.
     pub(crate) fn all_tags(&self) -> Result<Vec<Tag>> {
         self.db
-            .prepare_cached("select tag, usn, collapsed from tags")?
+            .prepare_cached(include_str!("get.sql"))?
             .query_and_then(NO_PARAMS, row_to_tag)?
             .collect()
     }
@@ -43,7 +44,7 @@ impl SqliteStorage {
 
     pub(crate) fn get_tag(&self, name: &str) -> Result<Option<Tag>> {
         self.db
-            .prepare_cached("select tag, usn, collapsed from tags where tag = ?")?
+            .prepare_cached(&format!("{} where tag = ?", include_str!("get.sql")))?
             .query_and_then(&[name], row_to_tag)?
             .next()
             .transpose()
@@ -65,13 +66,24 @@ impl SqliteStorage {
             .map_err(Into::into)
     }
 
-    // for undo in the future
-    #[allow(dead_code)]
-    pub(crate) fn get_tag_and_children(&self, name: &str) -> Result<Vec<Tag>> {
-        self.db
-            .prepare_cached("select tag, usn, collapsed from tags where tag regexp ?")?
-            .query_and_then(&[format!("(?i)^{}($|::)", regex::escape(name))], row_to_tag)?
-            .collect()
+    pub(crate) fn get_tags_by_predicate<F>(&self, want: F) -> Result<Vec<Tag>>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut query_stmt = self.db.prepare_cached(include_str!("get.sql"))?;
+        let mut rows = query_stmt.query(NO_PARAMS)?;
+        let mut output = vec![];
+        while let Some(row) = rows.next()? {
+            let tag = row.get_raw(0).as_str()?;
+            if want(tag) {
+                output.push(Tag {
+                    name: tag.to_owned(),
+                    usn: row.get(1)?,
+                    expanded: !row.get(2)?,
+                })
+            }
+        }
+        Ok(output)
     }
 
     pub(crate) fn remove_single_tag(&self, tag: &str) -> Result<()> {
@@ -82,19 +94,10 @@ impl SqliteStorage {
         Ok(())
     }
 
-    pub(crate) fn clear_tag_and_children(&self, tag: &str) -> Result<()> {
+    pub(crate) fn update_tag(&self, tag: &Tag) -> Result<()> {
         self.db
-            .prepare_cached("delete from tags where tag regexp ?")?
-            .execute(&[format!("(?i)^{}($|::)", regex::escape(tag))])?;
-
-        Ok(())
-    }
-
-    pub(crate) fn set_tag_collapsed(&self, tag: &str, collapsed: bool) -> Result<()> {
-        self.db
-            .prepare_cached("update tags set collapsed = ? where tag = ?")?
-            .execute(params![collapsed, tag])?;
-
+            .prepare_cached(include_str!("update.sql"))?
+            .execute(params![&tag.name, tag.usn, !tag.expanded])?;
         Ok(())
     }
 

@@ -6,8 +6,14 @@ ignore = forms,hooks_gen.py
 [TYPECHECK]
 ignored-modules=win32file,pywintypes,socket,win32pipe,winrt,pyaudio
 ignored-classes=
+  BrowserColumns,
+  BrowserRow,
   SearchNode,
   Config,
+  OpChanges,
+  UnburyDeckIn,
+  CardAnswer,
+  QueuedCards,
 
 [REPORTS]
 output-format=colorized

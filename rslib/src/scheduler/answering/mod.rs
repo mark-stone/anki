@@ -7,15 +7,6 @@ mod preview;
 mod relearning;
 mod review;
 mod revlog;
-mod undo;
-
-use crate::{
-    backend_proto,
-    card::CardQueue,
-    deckconf::{DeckConf, LeechAction},
-    decks::Deck,
-    prelude::*,
-};
 
 use revlog::RevlogEntryPartial;
 
@@ -25,6 +16,13 @@ use super::{
     },
     timespan::answer_button_time_collapsible,
     timing::SchedTimingToday,
+};
+use crate::{
+    backend_proto,
+    card::CardQueue,
+    deckconfig::{DeckConfig, LeechAction},
+    decks::Deck,
+    prelude::*,
 };
 
 #[derive(Copy, Clone)]
@@ -36,7 +34,7 @@ pub enum Rating {
 }
 
 pub struct CardAnswer {
-    pub card_id: CardID,
+    pub card_id: CardId,
     pub current_state: CardState,
     pub new_state: CardState,
     pub rating: Rating,
@@ -51,7 +49,7 @@ pub struct CardAnswer {
 struct CardStateUpdater {
     card: Card,
     deck: Deck,
-    config: DeckConf,
+    config: DeckConfig,
     timing: SchedTimingToday,
     now: TimestampSecs,
     fuzz_seed: Option<u64>,
@@ -93,7 +91,7 @@ impl CardStateUpdater {
     }
 
     fn secs_until_rollover(&self) -> u32 {
-        (self.timing.next_day_at - self.now.0).max(0) as u32
+        self.timing.next_day_at.elapsed_secs_since(self.now) as u32
     }
 
     fn into_card(self) -> Card {
@@ -133,7 +131,7 @@ impl CardStateUpdater {
                     }
                 }
             }
-        }?;
+        };
 
         Ok(revlog)
     }
@@ -142,7 +140,7 @@ impl CardStateUpdater {
         &mut self,
         current: CardState,
         next: NormalState,
-    ) -> Result<Option<RevlogEntryPartial>> {
+    ) -> Option<RevlogEntryPartial> {
         self.card.reps += 1;
         self.card.original_due = 0;
 
@@ -151,13 +149,13 @@ impl CardStateUpdater {
             NormalState::Learning(next) => self.apply_learning_state(current, next),
             NormalState::Review(next) => self.apply_review_state(current, next),
             NormalState::Relearning(next) => self.apply_relearning_state(current, next),
-        }?;
+        };
 
         if next.leeched() && self.config.inner.leech_action() == LeechAction::Suspend {
             self.card.queue = CardQueue::Suspended;
         }
 
-        Ok(revlog)
+        revlog
     }
 
     fn ensure_filtered(&self) -> Result<()> {
@@ -184,7 +182,7 @@ impl Rating {
 
 impl Collection {
     /// Return the next states that will be applied for each answer button.
-    pub fn get_next_card_states(&mut self, cid: CardID) -> Result<NextCardStates> {
+    pub fn get_next_card_states(&mut self, cid: CardId) -> Result<NextCardStates> {
         let card = self.storage.get_card(cid)?.ok_or(AnkiError::NotFound)?;
         let ctx = self.card_state_updater(card)?;
         let current = ctx.current_card_state();
@@ -197,7 +195,7 @@ impl Collection {
         let collapse_time = self.learn_ahead_secs();
         let now = TimestampSecs::now();
         let timing = self.timing_for_timestamp(now)?;
-        let secs_until_rollover = (timing.next_day_at - now.0).max(0) as u32;
+        let secs_until_rollover = timing.next_day_at.elapsed_secs_since(now).max(0) as u32;
 
         Ok(vec![
             answer_button_time_collapsible(
@@ -207,7 +205,7 @@ impl Collection {
                     .maybe_as_days(secs_until_rollover)
                     .as_seconds(),
                 collapse_time,
-                &self.i18n,
+                &self.tr,
             ),
             answer_button_time_collapsible(
                 choices
@@ -216,7 +214,7 @@ impl Collection {
                     .maybe_as_days(secs_until_rollover)
                     .as_seconds(),
                 collapse_time,
-                &self.i18n,
+                &self.tr,
             ),
             answer_button_time_collapsible(
                 choices
@@ -225,7 +223,7 @@ impl Collection {
                     .maybe_as_days(secs_until_rollover)
                     .as_seconds(),
                 collapse_time,
-                &self.i18n,
+                &self.tr,
             ),
             answer_button_time_collapsible(
                 choices
@@ -234,16 +232,14 @@ impl Collection {
                     .maybe_as_days(secs_until_rollover)
                     .as_seconds(),
                 collapse_time,
-                &self.i18n,
+                &self.tr,
             ),
         ])
     }
 
     /// Answer card, writing its new state to the database.
-    pub fn answer_card(&mut self, answer: &CardAnswer) -> Result<()> {
-        self.transact(Some(UndoableOpKind::AnswerCard), |col| {
-            col.answer_card_inner(answer)
-        })
+    pub fn answer_card(&mut self, answer: &CardAnswer) -> Result<OpOutput<()>> {
+        self.transact(Op::AnswerCard, |col| col.answer_card_inner(answer))
     }
 
     fn answer_card_inner(&mut self, answer: &CardAnswer) -> Result<()> {
@@ -265,21 +261,19 @@ impl Collection {
         if let Some(revlog_partial) = updater.apply_study_state(current_state, answer.new_state)? {
             self.add_partial_revlog(revlog_partial, usn, &answer)?;
         }
-        self.update_deck_stats_from_answer(usn, &answer, &updater)?;
+        self.update_deck_stats_from_answer(usn, &answer, &updater, original.queue)?;
         self.maybe_bury_siblings(&original, &updater.config)?;
         let timing = updater.timing;
         let mut card = updater.into_card();
-        self.update_card_inner(&mut card, &original, usn)?;
+        self.update_card_inner(&mut card, original, usn)?;
         if answer.new_state.leeched() {
             self.add_leech_tag(card.note_id)?;
         }
 
-        self.update_queues_after_answering_card(&card, timing)?;
-
-        Ok(())
+        self.update_queues_after_answering_card(&card, timing)
     }
 
-    fn maybe_bury_siblings(&mut self, card: &Card, config: &DeckConf) -> Result<()> {
+    fn maybe_bury_siblings(&mut self, card: &Card, config: &DeckConfig) -> Result<()> {
         if config.inner.bury_new || config.inner.bury_reviews {
             self.bury_siblings(
                 card.id,
@@ -314,26 +308,22 @@ impl Collection {
         usn: Usn,
         answer: &CardAnswer,
         updater: &CardStateUpdater,
+        from_queue: CardQueue,
     ) -> Result<()> {
+        let mut new_delta = 0;
+        let mut review_delta = 0;
+        match from_queue {
+            CardQueue::New => new_delta += 1,
+            CardQueue::Review => review_delta += 1,
+            _ => {}
+        }
         self.update_deck_stats(
             updater.timing.days_elapsed,
             usn,
             backend_proto::UpdateStatsIn {
                 deck_id: updater.deck.id.0,
-                new_delta: if matches!(answer.current_state, CardState::Normal(NormalState::New(_)))
-                {
-                    1
-                } else {
-                    0
-                },
-                review_delta: if matches!(
-                    answer.current_state,
-                    CardState::Normal(NormalState::Review(_))
-                ) {
-                    1
-                } else {
-                    0
-                },
+                new_delta,
+                review_delta,
                 millisecond_delta: answer.milliseconds_taken as i32,
             },
         )
@@ -358,9 +348,9 @@ impl Collection {
 
     fn home_deck_config(
         &self,
-        config_id: Option<DeckConfID>,
-        home_deck_id: DeckID,
-    ) -> Result<DeckConf> {
+        config_id: Option<DeckConfigId>,
+        home_deck_id: DeckId,
+    ) -> Result<DeckConfig> {
         let config_id = if let Some(config_id) = config_id {
             config_id
         } else {
@@ -374,17 +364,195 @@ impl Collection {
         Ok(self.storage.get_deck_config(config_id)?.unwrap_or_default())
     }
 
-    fn add_leech_tag(&mut self, nid: NoteID) -> Result<()> {
-        self.update_note_tags(nid, |tags| tags.push("leech".into()))
+    fn add_leech_tag(&mut self, nid: NoteId) -> Result<()> {
+        self.add_tags_to_notes_inner(&[nid], "leech")?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub mod test_helpers {
+    use super::*;
+
+    pub struct PostAnswerState {
+        pub card_id: CardId,
+        pub new_state: CardState,
+    }
+
+    impl Collection {
+        pub(crate) fn answer_again(&mut self) -> PostAnswerState {
+            self.answer(|states| states.again, Rating::Again).unwrap()
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn answer_hard(&mut self) -> PostAnswerState {
+            self.answer(|states| states.hard, Rating::Hard).unwrap()
+        }
+
+        pub(crate) fn answer_good(&mut self) -> PostAnswerState {
+            self.answer(|states| states.good, Rating::Good).unwrap()
+        }
+
+        pub(crate) fn answer_easy(&mut self) -> PostAnswerState {
+            self.answer(|states| states.easy, Rating::Easy).unwrap()
+        }
+
+        fn answer<F>(&mut self, get_state: F, rating: Rating) -> Result<PostAnswerState>
+        where
+            F: FnOnce(&NextCardStates) -> CardState,
+        {
+            let queued = self.get_next_card()?.unwrap();
+            let new_state = get_state(&queued.next_states);
+            self.answer_card(&CardAnswer {
+                card_id: queued.card.id,
+                current_state: queued.next_states.current,
+                new_state,
+                rating,
+                answered_at: TimestampMillis::now(),
+                milliseconds_taken: 0,
+            })?;
+            Ok(PostAnswerState {
+                card_id: queued.card.id,
+                new_state,
+            })
+        }
     }
 }
 
 /// Return a consistent seed for a given card at a given number of reps.
 /// If in test environment, disable fuzzing.
 fn get_fuzz_seed(card: &Card) -> Option<u64> {
-    if *crate::timestamp::TESTING || cfg!(test) {
+    if *crate::PYTHON_UNIT_TESTS || cfg!(test) {
         None
     } else {
         Some((card.id.0 as u64).wrapping_add(card.reps as u64))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{card::CardType, collection::open_test_collection};
+
+    fn current_state(col: &mut Collection, card_id: CardId) -> CardState {
+        col.get_next_card_states(card_id).unwrap().current
+    }
+
+    // make sure the 'current' state for a card matches the
+    // state we applied to it
+    #[test]
+    fn state_application() -> Result<()> {
+        let mut col = open_test_collection();
+        if col.timing_today()?.near_cutoff() {
+            return Ok(());
+        }
+        let nt = col.get_notetype_by_name("Basic")?.unwrap();
+        let mut note = nt.new_note();
+        col.add_note(&mut note, DeckId(1))?;
+
+        // new->learning
+        let post_answer = col.answer_again();
+        assert_eq!(
+            post_answer.new_state,
+            current_state(&mut col, post_answer.card_id)
+        );
+        let card = col.storage.get_card(post_answer.card_id)?.unwrap();
+        assert_eq!(card.queue, CardQueue::Learn);
+        assert_eq!(card.remaining_steps, 2);
+
+        // learning step
+        col.storage.db.execute_batch("update cards set due=0")?;
+        col.clear_study_queues();
+        let post_answer = col.answer_good();
+        assert_eq!(
+            post_answer.new_state,
+            current_state(&mut col, post_answer.card_id)
+        );
+        let card = col.storage.get_card(post_answer.card_id)?.unwrap();
+        assert_eq!(card.queue, CardQueue::Learn);
+        assert_eq!(card.remaining_steps, 1);
+
+        // graduation
+        col.storage.db.execute_batch("update cards set due=0")?;
+        col.clear_study_queues();
+        let mut post_answer = col.answer_good();
+        // compensate for shifting the due date
+        if let CardState::Normal(NormalState::Review(state)) = &mut post_answer.new_state {
+            state.elapsed_days = 1;
+        };
+        assert_eq!(
+            post_answer.new_state,
+            current_state(&mut col, post_answer.card_id)
+        );
+        let card = col.storage.get_card(post_answer.card_id)?.unwrap();
+        assert_eq!(card.queue, CardQueue::Review);
+        assert_eq!(card.interval, 1);
+        assert_eq!(card.remaining_steps, 0);
+
+        // answering a review card again; easy boost
+        col.storage.db.execute_batch("update cards set due=0")?;
+        col.clear_study_queues();
+        let mut post_answer = col.answer_easy();
+        if let CardState::Normal(NormalState::Review(state)) = &mut post_answer.new_state {
+            state.elapsed_days = 4;
+        };
+        assert_eq!(
+            post_answer.new_state,
+            current_state(&mut col, post_answer.card_id)
+        );
+        let card = col.storage.get_card(post_answer.card_id)?.unwrap();
+        assert_eq!(card.queue, CardQueue::Review);
+        assert_eq!(card.interval, 4);
+        assert_eq!(card.ease_factor, 2650);
+
+        // lapsing it
+        col.storage.db.execute_batch("update cards set due=0")?;
+        col.clear_study_queues();
+        let mut post_answer = col.answer_again();
+        if let CardState::Normal(NormalState::Relearning(state)) = &mut post_answer.new_state {
+            state.review.elapsed_days = 1;
+        };
+        assert_eq!(
+            post_answer.new_state,
+            current_state(&mut col, post_answer.card_id)
+        );
+        let card = col.storage.get_card(post_answer.card_id)?.unwrap();
+        assert_eq!(card.queue, CardQueue::Learn);
+        assert_eq!(card.ctype, CardType::Relearn);
+        assert_eq!(card.interval, 1);
+        assert_eq!(card.ease_factor, 2450);
+        assert_eq!(card.lapses, 1);
+
+        // failed in relearning
+        col.storage.db.execute_batch("update cards set due=0")?;
+        col.clear_study_queues();
+        let mut post_answer = col.answer_again();
+        if let CardState::Normal(NormalState::Relearning(state)) = &mut post_answer.new_state {
+            state.review.elapsed_days = 1;
+        };
+        assert_eq!(
+            post_answer.new_state,
+            current_state(&mut col, post_answer.card_id)
+        );
+        let card = col.storage.get_card(post_answer.card_id)?.unwrap();
+        assert_eq!(card.queue, CardQueue::Learn);
+        assert_eq!(card.lapses, 1);
+
+        // re-graduating
+        col.storage.db.execute_batch("update cards set due=0")?;
+        col.clear_study_queues();
+        let mut post_answer = col.answer_good();
+        if let CardState::Normal(NormalState::Review(state)) = &mut post_answer.new_state {
+            state.elapsed_days = 1;
+        };
+        assert_eq!(
+            post_answer.new_state,
+            current_state(&mut col, post_answer.card_id)
+        );
+        let card = col.storage.get_card(post_answer.card_id)?.unwrap();
+        assert_eq!(card.queue, CardQueue::Review);
+        assert_eq!(card.interval, 1);
+
+        Ok(())
     }
 }

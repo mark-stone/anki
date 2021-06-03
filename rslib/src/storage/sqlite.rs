@@ -1,18 +1,22 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
-use crate::config::schema11::schema11_config_as_string;
-use crate::err::Result;
-use crate::err::{AnkiError, DBErrorKind};
-use crate::timestamp::{TimestampMillis, TimestampSecs};
-use crate::{i18n::I18n, scheduler::timing::v1_creation_date, text::without_combining};
+use std::{borrow::Cow, cmp::Ordering, hash::Hasher, path::Path, sync::Arc};
+
+use fnv::FnvHasher;
 use regex::Regex;
 use rusqlite::{functions::FunctionFlags, params, Connection, NO_PARAMS};
-use std::cmp::Ordering;
-use std::{borrow::Cow, path::Path, sync::Arc};
 use unicase::UniCase;
 
 use super::upgrades::{SCHEMA_MAX_VERSION, SCHEMA_MIN_VERSION, SCHEMA_STARTING_VERSION};
+use crate::{
+    config::schema11::schema11_config_as_string,
+    error::{AnkiError, DbErrorKind, Result},
+    i18n::I18n,
+    scheduler::timing::{local_minutes_west_for_stamp, v1_creation_date},
+    text::without_combining,
+    timestamp::TimestampMillis,
+};
 
 fn unicase_compare(s1: &str, s2: &str) -> Ordering {
     UniCase::new(s1).cmp(&UniCase::new(s2))
@@ -48,6 +52,7 @@ fn open_or_create_collection_db(path: &Path) -> Result<Connection> {
     add_field_index_function(&db)?;
     add_regexp_function(&db)?;
     add_without_combining_function(&db)?;
+    add_fnvhash_function(&db)?;
 
     db.create_collation("unicase", unicase_compare)?;
 
@@ -83,6 +88,16 @@ fn add_without_combining_function(db: &Connection) -> rusqlite::Result<()> {
             })
         },
     )
+}
+
+fn add_fnvhash_function(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function("fnvhash", -1, FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        let mut hasher = FnvHasher::default();
+        for idx in 0..ctx.len() {
+            hasher.write_i64(ctx.get(idx)?);
+        }
+        Ok(hasher.finish() as i64)
+    })
 }
 
 /// Adds sql function regexp(regex, string) -> is_match
@@ -127,7 +142,9 @@ fn schema_version(db: &Connection) -> Result<(bool, u8)> {
 
     Ok((
         false,
-        db.query_row("select ver from col", NO_PARAMS, |r| Ok(r.get(0)?))?,
+        db.query_row("select ver from col", NO_PARAMS, |r| {
+            r.get(0).map_err(Into::into)
+        })?,
     ))
 }
 
@@ -136,25 +153,22 @@ fn trace(s: &str) {
 }
 
 impl SqliteStorage {
-    pub(crate) fn open_or_create(path: &Path, i18n: &I18n, server: bool) -> Result<Self> {
+    pub(crate) fn open_or_create(path: &Path, tr: &I18n, server: bool) -> Result<Self> {
         let db = open_or_create_collection_db(path)?;
         let (create, ver) = schema_version(&db)?;
 
         let err = match ver {
-            v if v < SCHEMA_MIN_VERSION => Some(DBErrorKind::FileTooOld),
-            v if v > SCHEMA_MAX_VERSION => Some(DBErrorKind::FileTooNew),
+            v if v < SCHEMA_MIN_VERSION => Some(DbErrorKind::FileTooOld),
+            v if v > SCHEMA_MAX_VERSION => Some(DbErrorKind::FileTooNew),
             12 | 13 => {
                 // as schema definition changed, user must perform clean
                 // shutdown to return to schema 11 prior to running this version
-                Some(DBErrorKind::FileTooNew)
+                Some(DbErrorKind::FileTooNew)
             }
             _ => None,
         };
         if let Some(kind) = err {
-            return Err(AnkiError::DBError {
-                info: "".to_string(),
-                kind,
-            });
+            return Err(AnkiError::db_error("", kind));
         }
 
         let upgrade = ver != SCHEMA_MAX_VERSION;
@@ -166,13 +180,18 @@ impl SqliteStorage {
             db.execute_batch(include_str!("schema11.sql"))?;
             // start at schema 11, then upgrade below
             let crt = v1_creation_date();
+            let offset = if server {
+                None
+            } else {
+                Some(local_minutes_west_for_stamp(crt))
+            };
             db.execute(
                 "update col set crt=?, scm=?, ver=?, conf=?",
                 params![
                     crt,
                     TimestampMillis::now(),
                     SCHEMA_STARTING_VERSION,
-                    &schema11_config_as_string()
+                    &schema11_config_as_string(offset)
                 ],
             )?;
         }
@@ -184,9 +203,9 @@ impl SqliteStorage {
         }
 
         if create {
-            storage.add_default_deck_config(i18n)?;
-            storage.add_default_deck(i18n)?;
-            storage.add_stock_notetypes(i18n)?;
+            storage.add_default_deck_config(tr)?;
+            storage.add_default_deck(tr)?;
+            storage.add_stock_notetypes(tr)?;
         }
 
         if create || upgrade {
@@ -252,74 +271,6 @@ impl SqliteStorage {
         self.db
             .prepare_cached("rollback to rust")?
             .execute(NO_PARAMS)?;
-        Ok(())
-    }
-
-    //////////////////////////////////////////
-
-    pub(crate) fn mark_modified(&self) -> Result<()> {
-        self.set_modified_time(TimestampMillis::now())
-    }
-
-    pub(crate) fn set_modified_time(&self, stamp: TimestampMillis) -> Result<()> {
-        self.db
-            .prepare_cached("update col set mod=?")?
-            .execute(params![stamp])?;
-        Ok(())
-    }
-
-    pub(crate) fn get_modified_time(&self) -> Result<TimestampMillis> {
-        self.db
-            .prepare_cached("select mod from col")?
-            .query_and_then(NO_PARAMS, |r| r.get(0))?
-            .next()
-            .ok_or_else(|| AnkiError::invalid_input("missing col"))?
-            .map_err(Into::into)
-    }
-
-    pub(crate) fn creation_stamp(&self) -> Result<TimestampSecs> {
-        self.db
-            .prepare_cached("select crt from col")?
-            .query_row(NO_PARAMS, |row| row.get(0))
-            .map_err(Into::into)
-    }
-
-    pub(crate) fn set_creation_stamp(&self, stamp: TimestampSecs) -> Result<()> {
-        self.db
-            .prepare("update col set crt = ?")?
-            .execute(&[stamp])?;
-        Ok(())
-    }
-
-    pub(crate) fn set_schema_modified(&self) -> Result<()> {
-        self.db
-            .prepare_cached("update col set scm = ?")?
-            .execute(&[TimestampMillis::now()])?;
-        Ok(())
-    }
-
-    pub(crate) fn get_schema_mtime(&self) -> Result<TimestampMillis> {
-        self.db
-            .prepare_cached("select scm from col")?
-            .query_and_then(NO_PARAMS, |r| r.get(0))?
-            .next()
-            .ok_or_else(|| AnkiError::invalid_input("missing col"))?
-            .map_err(Into::into)
-    }
-
-    pub(crate) fn get_last_sync(&self) -> Result<TimestampMillis> {
-        self.db
-            .prepare_cached("select ls from col")?
-            .query_and_then(NO_PARAMS, |r| r.get(0))?
-            .next()
-            .ok_or_else(|| AnkiError::invalid_input("missing col"))?
-            .map_err(Into::into)
-    }
-
-    pub(crate) fn set_last_sync(&self, stamp: TimestampMillis) -> Result<()> {
-        self.db
-            .prepare("update col set ls = ?")?
-            .execute(&[stamp])?;
         Ok(())
     }
 

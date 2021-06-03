@@ -1,0 +1,41 @@
+load("@npm//@bazel/typescript:index.bzl", "ts_library")
+load("//ts:jest.bzl", "jest_test")
+load("//ts:prettier.bzl", "prettier_test")
+load("//ts:eslint.bzl", "eslint_test")
+
+ts_library(
+    name = "html-filter",
+    module_name = "html-filter",
+    srcs = glob(
+        ["*.ts"],
+        exclude = ["*.test.ts"],
+    ),
+    tsconfig = "//ts:tsconfig.json",
+    visibility = ["//visibility:public"],
+    deps = [],
+)
+
+jest_test(
+    deps = [
+        "html-filter",
+    ],
+)
+
+# Tests
+################
+
+prettier_test(
+    name = "format_check",
+    srcs = glob([
+        "*.ts",
+    ]),
+)
+
+eslint_test(
+    name = "eslint",
+    srcs = glob(
+        [
+            "*.ts",
+        ],
+    ),
+)

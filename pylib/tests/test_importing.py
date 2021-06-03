@@ -1,3 +1,6 @@
+# Copyright: Ankitects Pty Ltd and contributors
+# License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
 # coding: utf-8
 
 import os
@@ -22,7 +25,7 @@ srcCards = None
 
 
 def clear_tempfile(tf):
-    """ https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file """
+    """https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file"""
     try:
         tf.close()
         os.unlink(tf.name)
